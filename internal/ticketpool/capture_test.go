@@ -27,6 +27,9 @@ type captureStub struct {
 	status int
 	state  string
 	body   string
+	// echoModel 为真时正文由假桩现编：自报的模型就是请求里的那个模型，
+	// 也就是上游正常服务时的样子（满血判定要求两者一致）。
+	echoModel bool
 
 	// 最后一次收到的请求，用于断言探针发了什么。
 	lastPath   string
@@ -46,6 +49,10 @@ func newCaptureStub(t *testing.T) *captureStub {
 		stub.lastBody = nil
 		json.Unmarshal(raw, &stub.lastBody)
 		status, state, body := stub.status, stub.state, stub.body
+		if stub.echoModel {
+			served, _ := stub.lastBody["model"].(string)
+			body = sseCreatedAs(served) + sseText
+		}
 		stub.mu.Unlock()
 
 		if state != "" {
@@ -64,6 +71,15 @@ func (s *captureStub) reply(status int, state, body string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status, s.state, s.body = status, state, body
+	s.echoModel = false
+}
+
+// replyServed 回一个「上游照请求的模型服务」的正常响应，不管探的是哪个模型。
+func (s *captureStub) replyServed(status int, state string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status, s.state, s.body = status, state, ""
+	s.echoModel = true
 }
 
 // seen 返回最后一次收到的请求。
@@ -82,6 +98,12 @@ const (
 )
 
 func state(length int) string { return strings.Repeat("s", length) }
+
+// probeModel 是 probeOnce 请求的模型；满血判定要求上游自报的就是它。
+const probeModel = "gpt-5-codex"
+
+// sseServed 是一条正常的流：上游自报的模型与请求的一致，并且有产出。
+var sseServed = sseCreatedAs(probeModel) + sseText
 
 // sseCreatedAs / sseCompletedAs 让假桩自报一个模型名，用来模拟上游换模型服务。
 func sseCreatedAs(model string) string {
@@ -126,8 +148,7 @@ func testCredential() Credential {
 	return Credential{Authorization: "Bearer " + strings.Repeat("a", 40), AccountHeader: "acct-9"}
 }
 
-// 分级表决定了哪张票入池，只有 healthy 会入池。长度口径按模型取：这里探的是
-// gpt-5-codex，覆盖表里没有它，落到全局兜底的 292。
+// 分级表决定了哪张票入池，只有 healthy 会入池：200 + 有产出 + 上游自报的模型与请求的一致。
 func TestProbeGrading(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -136,9 +157,11 @@ func TestProbeGrading(t *testing.T) {
 		body   string
 		want   Grade
 	}{
-		{"满血", 200, state(292), sseText, GradeHealthy},
-		{"只有 completed 也算有产出", 200, state(292), sseCompleted, GradeHealthy},
-		{"长度不符", 200, state(312), sseText, GradeMismatch},
+		{"满血", 200, state(292), sseServed, GradeHealthy},
+		{"只有 completed 也算有产出", 200, state(292), sseCompletedAs(probeModel), GradeHealthy},
+		{"长度不标准也照收", 200, state(7), sseServed, GradeHealthy},
+		{"上游没回报模型名", 200, state(292), sseText, GradeUnverified},
+		{"上游换了模型", 200, state(292), sseCreatedAs("gpt-5.6-luna") + sseText, GradeDowngraded},
 		{"降智", 200, state(292), sseOverload, GradeOverloaded},
 		{"非 overload 的错误算未完成", 200, state(292), sseOther, GradePartial},
 		{"completed 里带 error 算未完成", 200, state(292), sseFailed, GradePartial},
@@ -165,33 +188,20 @@ func TestProbeGrading(t *testing.T) {
 	}
 }
 
-// target_state_length 设为 0 表示不按长度判定，任何带产出的票都入池。
-func TestProbeWithoutLengthJudgement(t *testing.T) {
+// state 的长度不参与判定：长度因模型、因上游版本而异，只要模型对得上就是满血票。
+func TestProbeIgnoresStateLength(t *testing.T) {
 	stub := newCaptureStub(t)
-	stub.reply(http.StatusOK, state(312), sseText)
+	prober := newProber(t, stub, nil)
 
-	got := probeOnce(t, stub, testCredential(), func(config *pluginconfig.Ticket) {
-		config.TargetStateLength = 0
-	})
-	if got.grade != GradeHealthy {
-		t.Fatalf("分级 = %s，期望 healthy", got.grade)
-	}
-}
-
-// 长度口径按模型取：同一个探针对两个模型用各自的标准判定。
-func TestProbeUsesPerModelTargetLength(t *testing.T) {
-	stub := newCaptureStub(t)
-	stub.reply(http.StatusOK, state(312), sseText)
-	prober := newProber(t, stub, func(config *pluginconfig.Ticket) {
-		config.TargetStateLength = 292
-		config.ModelStateLengths = map[string]int{"gpt-6-astra": 312}
-	})
-
-	if got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", ""); got.grade != GradeHealthy {
-		t.Fatalf("astra 的口径是 312，312 的票应当是 healthy，得到 %s", got.grade)
-	}
-	if got := prober.probe(context.Background(), testCredential(), "gpt-5.5", ""); got.grade != GradeMismatch {
-		t.Fatalf("5.5 落到兜底的 292，312 的票应当是 mismatch，得到 %s", got.grade)
+	for _, length := range []int{1, 292, 312, 1024} {
+		stub.reply(http.StatusOK, state(length), sseCreatedAs("gpt-6-astra")+sseText)
+		got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", "")
+		if got.grade != GradeHealthy {
+			t.Fatalf("长度 %d 的票分级 = %s，期望 healthy（detail=%q）", length, got.grade, got.detail)
+		}
+		if got.length != length {
+			t.Fatalf("长度仍然要如实记录，得到 %d", got.length)
+		}
 	}
 }
 
@@ -200,9 +210,7 @@ func TestProbeUsesPerModelTargetLength(t *testing.T) {
 func TestProbeDetectsServedModelDowngrade(t *testing.T) {
 	stub := newCaptureStub(t)
 	stub.reply(http.StatusOK, state(312), sseCreatedAs("gpt-5.6-luna")+sseText)
-	prober := newProber(t, stub, func(config *pluginconfig.Ticket) {
-		config.ModelStateLengths = map[string]int{"gpt-6-astra": 312}
-	})
+	prober := newProber(t, stub, nil)
 
 	got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", "")
 	if got.grade != GradeDowngraded {
@@ -213,7 +221,7 @@ func TestProbeDetectsServedModelDowngrade(t *testing.T) {
 	}
 	// 只有 healthy 入池，降级票必须被挡在池外。
 	store := NewStore()
-	if added := store.StoreRound(1, "gpt-6-astra", []record{got}, storeParamsLen(3, 312), time.Unix(1700000000, 0)); added != 0 {
+	if added := store.StoreRound(1, "gpt-6-astra", []record{got}, storeParams(3), time.Unix(1700000000, 0)); added != 0 {
 		t.Fatalf("降级票入池了 %d 张", added)
 	}
 
@@ -223,15 +231,19 @@ func TestProbeDetectsServedModelDowngrade(t *testing.T) {
 		t.Fatalf("completed 里的模型名也要认，得到 %s", got.grade)
 	}
 
-	// 上游自报的名字与请求一致时照旧走长度判定。
+	// 上游自报的名字与请求一致才是满血票。
 	stub.reply(http.StatusOK, state(312), sseCreatedAs("gpt-6-astra")+sseText)
 	if got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", ""); got.grade != GradeHealthy {
-		t.Fatalf("同名时应当回到长度判定，得到 %s（detail=%q）", got.grade, got.detail)
+		t.Fatalf("同名时应当是 healthy，得到 %s（detail=%q）", got.grade, got.detail)
 	}
-	// 上游没给模型名时也一样——老网关不带这个字段，不能因此判成降级。
+	// 上游一个模型名都没给：确认不了这张票属于谁，宁可不收，也不能当成满血票。
 	stub.reply(http.StatusOK, state(312), sseText)
-	if got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", ""); got.grade != GradeHealthy {
-		t.Fatalf("没有模型名时应当回到长度判定，得到 %s", got.grade)
+	got = prober.probe(context.Background(), testCredential(), "gpt-6-astra", "")
+	if got.grade != GradeUnverified {
+		t.Fatalf("没有模型名时应当是 unverified，得到 %s", got.grade)
+	}
+	if added := store.StoreRound(1, "gpt-6-astra", []record{got}, storeParams(3), time.Unix(1700000000, 0)); added != 0 {
+		t.Fatalf("未确认的票入池了 %d 张", added)
 	}
 }
 
@@ -253,7 +265,7 @@ func TestProbeDoesNotEchoUnsafeServedModel(t *testing.T) {
 // state 会被原样写进发往上游的请求头，含 CR/LF/NUL 就是响应头注入。
 func TestProbeRejectsUnsafeState(t *testing.T) {
 	stub := newCaptureStub(t)
-	stub.reply(http.StatusOK, "", sseText)
+	stub.reply(http.StatusOK, "", sseServed)
 	// httptest 的 ResponseWriter 会挡掉真正的 CRLF，这里直接单测 sanitizeState。
 	for _, value := range []string{"a\rb", "a\nb", "a\x00b", strings.Repeat("s", maxStateBytes+1), ""} {
 		if got := sanitizeState(value); got != "" {
@@ -264,17 +276,20 @@ func TestProbeRejectsUnsafeState(t *testing.T) {
 		t.Fatalf("正常值被改写成 %q", got)
 	}
 
-	// 头里带控制字符时整张票作废：没有 state 的票不可能入池。
+	// 头里带控制字符时整张票作废：没有 state 的票分级可以是 healthy，但 StoreRound 不收。
 	got := probeOnce(t, stub, testCredential(), nil)
-	if got.state != "" || got.grade != GradeMismatch {
-		t.Fatalf("没有 state 时 = %s/%q，期望 mismatch（长度 0 不等于 292）", got.grade, got.state)
+	if got.state != "" {
+		t.Fatalf("没有 state 时 = %q", got.state)
+	}
+	if added := NewStore().StoreRound(1, probeModel, []record{got}, storeParams(3), time.Unix(1700000000, 0)); added != 0 {
+		t.Fatalf("没有 state 的票入池了 %d 张", added)
 	}
 }
 
 // 网关根跟着宿主实际在用的端点走：换中转、换域名都不需要改插件配置。
 func TestProbeUsesHarvestedGatewayAndUserAgent(t *testing.T) {
 	stub := newCaptureStub(t)
-	stub.reply(http.StatusOK, state(292), sseText)
+	stub.reply(http.StatusOK, state(292), sseServed)
 
 	cred := testCredential()
 	cred.GatewayBase = stub.server.URL + "/relay/v1/"
@@ -307,7 +322,7 @@ func TestProbeUsesHarvestedGatewayAndUserAgent(t *testing.T) {
 
 func TestProbeFallsBackToConfiguredGatewayAndUserAgent(t *testing.T) {
 	stub := newCaptureStub(t)
-	stub.reply(http.StatusOK, state(292), sseText)
+	stub.reply(http.StatusOK, state(292), sseServed)
 
 	got := probeOnce(t, stub, testCredential(), func(config *pluginconfig.Ticket) {
 		config.UserAgent = "fallback-ua"
@@ -408,14 +423,14 @@ func TestSortRecordsRanksHealthyFirst(t *testing.T) {
 	records := []record{
 		{grade: GradeError, state: ""}, // 没有 state，直接被丢掉
 		{grade: GradeBlocked, state: "b", length: 1},
-		{grade: GradeMismatch, state: "m1", length: 312},
-		{grade: GradeMismatch, state: "m2", length: 400},
+		{grade: GradeUnverified, state: "m1", length: 312},
+		{grade: GradeUnverified, state: "m2", length: 400},
 		{grade: GradeHealthy, state: "h", length: 292},
 		{grade: GradeWeak, state: "w", length: 292},
 	}
 	got := sortRecords(records)
 
-	want := []Grade{GradeHealthy, GradeWeak, GradeMismatch, GradeMismatch, GradeBlocked}
+	want := []Grade{GradeHealthy, GradeWeak, GradeUnverified, GradeUnverified, GradeBlocked}
 	if len(got) != len(want) {
 		t.Fatalf("排序后 %d 条，期望 %d 条（无 state 的应被丢弃）", len(got), len(want))
 	}
@@ -424,7 +439,7 @@ func TestSortRecordsRanksHealthyFirst(t *testing.T) {
 			t.Fatalf("第 %d 条是 %s，期望 %s", index, got[index].grade, grade)
 		}
 	}
-	// 同分级按长度降序：同样是 mismatch，先试更长的那张。
+	// 同分级按长度降序：同样是 unverified，先试更长的那张。
 	if got[2].length != 400 || got[3].length != 312 {
 		t.Fatalf("同分级未按长度降序: %d, %d", got[2].length, got[3].length)
 	}
@@ -433,10 +448,10 @@ func TestSortRecordsRanksHealthyFirst(t *testing.T) {
 // 一轮没补到票时这行会进看板，但它不能含 state 本身，代理地址也要打码。
 func TestSummarizeRecordsMasksProxyAndOmitsState(t *testing.T) {
 	got := summarizeRecords([]record{
-		{grade: GradeMismatch, state: "super-secret-state", length: 312, status: 200},
+		{grade: GradeDowngraded, state: "super-secret-state", length: 312, status: 200},
 		{grade: GradeHealthy, state: "another-secret", length: 292, status: 200, proxy: "socks5://1.2.3.4:1080"},
 	})
-	if got != "direct=mismatch(200/312) socks5://1.2.*.*:1080=healthy(200/292)" {
+	if got != "direct=downgraded(200/312) socks5://1.2.*.*:1080=healthy(200/292)" {
 		t.Fatalf("摘要 = %q", got)
 	}
 	if strings.Contains(got, "secret") || strings.Contains(got, "1.2.3.4") {

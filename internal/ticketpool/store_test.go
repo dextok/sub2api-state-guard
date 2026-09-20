@@ -39,15 +39,7 @@ func storeParams(size int) StoreParams {
 		StaggerSeconds: 600,
 		MinTTLSeconds:  300,
 		Size:           size,
-		TargetLength:   targetLength,
 	}
-}
-
-// storeParamsLen 与 storeParams 相同，只是换一个满血长度口径。
-func storeParamsLen(size, length int) StoreParams {
-	params := storeParams(size)
-	params.TargetLength = length
-	return params
 }
 
 // 决策表来自参考实现，改动它等于改动整个补池节奏，所以逐行钉住。
@@ -57,7 +49,7 @@ func TestPlanDecisionTable(t *testing.T) {
 
 	t.Run("池空则补满", func(t *testing.T) {
 		store := NewStore()
-		plan := store.Plan(1, "m", size, threshold, targetLength, now)
+		plan := store.Plan(1, "m", size, threshold, now)
 		if plan.Reason != "empty" || plan.Need != size || plan.Replace || plan.Valid != 0 {
 			t.Fatalf("plan = %+v", plan)
 		}
@@ -66,7 +58,7 @@ func TestPlanDecisionTable(t *testing.T) {
 	t.Run("未满但刚补过则冷却", func(t *testing.T) {
 		store := NewStore()
 		store.StoreRound(1, "m", []record{healthyRecord("a")}, storeParams(size), now)
-		plan := store.Plan(1, "m", size, threshold, targetLength, now.Add(599*time.Second))
+		plan := store.Plan(1, "m", size, threshold, now.Add(599*time.Second))
 		if plan.Reason != "cooldown" || plan.Need != 0 || plan.Valid != 1 {
 			t.Fatalf("plan = %+v", plan)
 		}
@@ -75,7 +67,7 @@ func TestPlanDecisionTable(t *testing.T) {
 	t.Run("未满且过了冷却则补齐差额", func(t *testing.T) {
 		store := NewStore()
 		store.StoreRound(1, "m", []record{healthyRecord("a")}, storeParams(size), now)
-		plan := store.Plan(1, "m", size, threshold, targetLength, now.Add(600*time.Second))
+		plan := store.Plan(1, "m", size, threshold, now.Add(600*time.Second))
 		if plan.Reason != "partial" || plan.Need != size-1 || plan.Replace {
 			t.Fatalf("plan = %+v", plan)
 		}
@@ -85,7 +77,7 @@ func TestPlanDecisionTable(t *testing.T) {
 		store := NewStore()
 		store.StoreRound(1, "m", []record{healthyRecord("a"), healthyRecord("b"), healthyRecord("c")},
 			storeParams(size), now)
-		plan := store.Plan(1, "m", size, threshold, targetLength, now.Add(time.Minute))
+		plan := store.Plan(1, "m", size, threshold, now.Add(time.Minute))
 		if plan.Reason != "full" || plan.Need != 0 || plan.Valid != size {
 			t.Fatalf("plan = %+v", plan)
 		}
@@ -99,7 +91,7 @@ func TestPlanDecisionTable(t *testing.T) {
 		store.StoreRound(1, "m", []record{healthyRecord("a"), healthyRecord("b"), healthyRecord("c")},
 			params, now)
 		// 最新一张 2700s 后过期，到 2200s 时只剩 500s < threshold。
-		plan := store.Plan(1, "m", size, threshold, targetLength, now.Add(2200*time.Second))
+		plan := store.Plan(1, "m", size, threshold, now.Add(2200*time.Second))
 		if plan.Reason != "renew" || plan.Need != 1 || !plan.Replace || plan.Valid != size {
 			t.Fatalf("plan = %+v", plan)
 		}
@@ -108,29 +100,11 @@ func TestPlanDecisionTable(t *testing.T) {
 	t.Run("过期票不算数", func(t *testing.T) {
 		store := NewStore()
 		store.StoreRound(1, "m", []record{healthyRecord("a")}, storeParams(size), now)
-		plan := store.Plan(1, "m", size, threshold, targetLength, now.Add(3000*time.Second))
+		plan := store.Plan(1, "m", size, threshold, now.Add(3000*time.Second))
 		if plan.Reason != "empty" || plan.Need != size {
 			t.Fatalf("plan = %+v", plan)
 		}
 	})
-}
-
-// 管理员改了 target_state_length 之后，旧口径下收进来的票就不该继续被注入。
-func TestPlanPurgesTicketsWithStaleLength(t *testing.T) {
-	now := time.Unix(1700000000, 0)
-	store := NewStore()
-	store.StoreRound(1, "m", []record{healthyRecord("a")}, storeParams(3), now)
-	if valid := store.Valid(1, "m", now); valid != 1 {
-		t.Fatalf("入池 %d 张", valid)
-	}
-
-	plan := store.Plan(1, "m", 3, 600, 312, now)
-	if plan.Reason != "empty" || plan.Valid != 0 {
-		t.Fatalf("改判定长度后旧票应被清掉，plan = %+v", plan)
-	}
-	if _, ok := store.Pick(1, "m", 0, now); ok {
-		t.Fatal("旧口径的票不该还能被取到")
-	}
 }
 
 func TestStoreRoundOnlyKeepsHealthyAndDeduplicates(t *testing.T) {
@@ -141,7 +115,7 @@ func TestStoreRoundOnlyKeepsHealthyAndDeduplicates(t *testing.T) {
 	added := store.StoreRound(1, "m", []record{
 		healthy,
 		healthy, // 同一个 state 重复出现（两个出口撞到同一张）
-		mkRecord("mismatched", GradeMismatch),
+		mkRecord("unverified", GradeUnverified),
 		mkRecord("weak", GradeWeak),
 		{grade: GradeHealthy, state: "", length: 0}, // 满血但没拿到 state
 		healthyRecord("b"),
@@ -183,7 +157,7 @@ func TestStoreRoundClampsToMinTTL(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	store := NewStore()
 	params := StoreParams{Cap: 5, TTLSeconds: 900, StaggerSeconds: 600,
-		MinTTLSeconds: 300, Size: 5, TargetLength: targetLength}
+		MinTTLSeconds: 300, Size: 5}
 
 	store.StoreRound(1, "m", []record{
 		healthyRecord("a"), healthyRecord("b"), healthyRecord("c"),
@@ -222,7 +196,7 @@ func TestStoreRoundReplacesSoonestExpiring(t *testing.T) {
 		t.Fatalf("池里还剩 %v，期望 a 保留", sortedKeys(states))
 	}
 	// 新票最新，转发时应当优先取到它。
-	picked, ok := store.Pick(1, "m", 0, later)
+	picked, ok := store.Pick(1, "m", later)
 	if !ok || !strings.HasPrefix(picked, "c") {
 		t.Fatalf("续期后取到 %q…，期望是新票 c", picked[:1])
 	}
@@ -272,7 +246,7 @@ func TestPickPrefersNewestTicket(t *testing.T) {
 	newer := now.Add(time.Minute)
 	store.StoreRound(1, "m", []record{healthyRecord("b")}, storeParams(3), newer)
 
-	picked, ok := store.Pick(1, "m", 0, newer)
+	picked, ok := store.Pick(1, "m", newer)
 	if !ok {
 		t.Fatal("应当取到票")
 	}
@@ -286,16 +260,16 @@ func TestPickIsolatesModelsAndAccounts(t *testing.T) {
 	store := NewStore()
 	store.StoreRound(1, "gpt-5-codex", []record{healthyRecord("a")}, storeParams(3), now)
 
-	if _, ok := store.Pick(1, "gpt-5", 0, now); ok {
+	if _, ok := store.Pick(1, "gpt-5", now); ok {
 		t.Fatal("票按模型铸造，绝不能跨模型复用")
 	}
-	if _, ok := store.Pick(2, "gpt-5-codex", 0, now); ok {
+	if _, ok := store.Pick(2, "gpt-5-codex", now); ok {
 		t.Fatal("票不能跨账号复用")
 	}
-	if _, ok := store.Pick(1, "", 0, now); ok {
+	if _, ok := store.Pick(1, "", now); ok {
 		t.Fatal("模型名为空时不该返回票")
 	}
-	if _, ok := store.Pick(1, "gpt-5-codex", 0, now); !ok {
+	if _, ok := store.Pick(1, "gpt-5-codex", now); !ok {
 		t.Fatal("本模型的票应当取得到")
 	}
 }
@@ -304,45 +278,39 @@ func TestPickIsolatesModelsAndAccounts(t *testing.T) {
 func TestReadyIgnoresModelButRespectsExpiry(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	store := NewStore()
-	anyLength := func(string) int { return 0 }
-	if store.Ready(1, anyLength, now) {
+	if store.Ready(1, now) {
 		t.Fatal("空池不该 Ready")
 	}
 	store.StoreRound(1, "gpt-5-codex", []record{healthyRecord("a")}, storeParams(3), now)
-	if !store.Ready(1, anyLength, now) {
+	if !store.Ready(1, now) {
 		t.Fatal("有票就该 Ready")
 	}
-	if store.Ready(2, anyLength, now) {
+	if store.Ready(2, now) {
 		t.Fatal("别的账号不该 Ready")
 	}
-	if store.Ready(1, anyLength, now.Add(2701*time.Second)) {
+	if store.Ready(1, now.Add(2701*time.Second)) {
 		t.Fatal("票过期后不该 Ready")
 	}
 }
 
-// Ready 的口径是按模型取的：同一账号下两个模型各认各的满血长度，
-// 只有长度对得上的那个池才让账号 Ready。
-func TestReadyResolvesTargetLengthPerModel(t *testing.T) {
+// 票的长度不参与任何判定：同一账号下两个模型的票长度不同，照样都能用。
+func TestTicketLengthDoesNotGateUsability(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	store := NewStore()
-	store.StoreRound(1, "gpt-5.5", []record{healthyRecordState("a", 292)}, storeParamsLen(3, 292), now)
-	store.StoreRound(1, "gpt-6-astra", []record{healthyRecordState("b", 312)}, storeParamsLen(3, 312), now)
+	store.StoreRound(1, "gpt-5.5", []record{healthyRecordState("a", 292)}, storeParams(3), now)
+	store.StoreRound(1, "gpt-6-astra", []record{healthyRecordState("b", 312)}, storeParams(3), now)
 
-	lengths := map[string]int{"gpt-5.5": 292, "gpt-6-astra": 312}
-	targetFor := func(model string) int { return lengths[model] }
-	if !store.Ready(1, targetFor, now) {
-		t.Fatal("两个池的长度都对得上，账号应当 Ready")
+	if !store.Ready(1, now) {
+		t.Fatal("两个池都有票，账号应当 Ready")
 	}
-
-	// 把两个池的口径都换成对方的长度，两边就都不合格了。
-	swapped := map[string]int{"gpt-5.5": 312, "gpt-6-astra": 292}
-	if store.Ready(1, func(model string) int { return swapped[model] }, now) {
-		t.Fatal("口径互换后没有任何一个池的票合格，不该 Ready")
-	}
-	// 只有 astra 的口径错，5.5 那个池仍然让账号 Ready——Ready 是账号级的或。
-	half := map[string]int{"gpt-5.5": 292, "gpt-6-astra": 292}
-	if !store.Ready(1, func(model string) int { return half[model] }, now) {
-		t.Fatal("还有一个池合格时账号应当 Ready")
+	for model, length := range map[string]int{"gpt-5.5": 292, "gpt-6-astra": 312} {
+		state, ok := store.Pick(1, model, now)
+		if !ok {
+			t.Fatalf("%s 的票应当取得到", model)
+		}
+		if len(state) != length {
+			t.Fatalf("%s 取到的票长度 = %d，期望 %d", model, len(state), length)
+		}
 	}
 }
 
@@ -351,9 +319,9 @@ func TestPickCountsHitsAndMisses(t *testing.T) {
 	store := NewStore()
 	store.StoreRound(1, "m", []record{healthyRecord("a")}, storeParams(3), now)
 
-	store.Pick(1, "m", 0, now)
-	store.Pick(1, "m", 0, now)
-	store.Pick(1, "m", 0, now.Add(3000*time.Second))
+	store.Pick(1, "m", now)
+	store.Pick(1, "m", now)
+	store.Pick(1, "m", now.Add(3000*time.Second))
 
 	status := store.ModelStatuses(1, 3, now)[0]
 	if status.Hits != 2 || status.Misses != 1 {
@@ -416,7 +384,7 @@ func TestModelStatusesIncludesTouchedEmptyPool(t *testing.T) {
 func TestNoteRoundSurfacesOnDashboard(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	store := NewStore()
-	store.NoteRound(1, "m", "empty", 0, map[Grade]int{GradeMismatch: 4}, "direct=mismatch(200/312)", now)
+	store.NoteRound(1, "m", "empty", 0, map[Grade]int{GradeDowngraded: 4}, "direct=downgraded(200/312)", now)
 
 	status := store.ModelStatuses(1, 5, now.Add(30*time.Second))[0]
 	if status.Reason != "empty" || status.LastAdded != 0 {
@@ -425,16 +393,16 @@ func TestNoteRoundSurfacesOnDashboard(t *testing.T) {
 	if status.LastRefillSeconds != 30 {
 		t.Fatalf("距上轮补池 %d 秒，期望 30", status.LastRefillSeconds)
 	}
-	if status.Grades["mismatch"] != 4 {
+	if status.Grades["downgraded"] != 4 {
 		t.Fatalf("分级 = %v", status.Grades)
 	}
-	if status.Detail != "direct=mismatch(200/312)" {
+	if status.Detail != "direct=downgraded(200/312)" {
 		t.Fatalf("摘要 = %q", status.Detail)
 	}
 
 	// grades 传 nil 表示「这轮没发探针」，不该把上一轮的分级抹掉。
 	store.NoteRound(1, "m", "cooldown", 0, nil, "", now)
-	if status := store.ModelStatuses(1, 5, now)[0]; status.Grades["mismatch"] != 4 {
+	if status := store.ModelStatuses(1, 5, now)[0]; status.Grades["downgraded"] != 4 {
 		t.Fatalf("分级被 nil 抹掉了: %v", status.Grades)
 	}
 }

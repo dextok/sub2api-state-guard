@@ -35,28 +35,37 @@ func testIdentity() Identity {
 type gatewayStub struct {
 	server *httptest.Server
 	calls  atomic.Int64
-	// length 是要回的 state 长度；等于该模型的满血长度才算满血票。
+	// length 是要回的 state 长度；长度不参与满血判定，只是让票有个内容。
 	length atomic.Int64
 	status atomic.Int64
-	// served 非空时，SSE 里自报这个模型名，用来模拟上游换模型服务（降级）。
+	// served 非空时，SSE 里自报这个模型名，用来模拟上游换模型服务（降级）；
+	// 空则照请求的模型自报，也就是上游正常服务的样子。
 	served atomic.Value
 }
 
 func newGatewayStub(t *testing.T) *gatewayStub {
 	t.Helper()
 	stub := &gatewayStub{}
-	stub.length.Store(int64(pluginconfig.DefaultTargetStateLength))
+	stub.length.Store(292)
 	stub.status.Store(http.StatusOK)
 	stub.served.Store("")
 	stub.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		serial := stub.calls.Add(1)
+		var payload struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&payload)
 		_, _ = io.Copy(io.Discard, request.Body)
 		if length := int(stub.length.Load()); length > 0 {
 			writer.Header().Set(pluginconfig.DefaultHeaderName, mintState(serial, length))
 		}
 		writer.Header().Set("Content-Type", "text/event-stream")
 		writer.WriteHeader(int(stub.status.Load()))
-		if served, _ := stub.served.Load().(string); served != "" {
+		served, _ := stub.served.Load().(string)
+		if served == "" {
+			served = payload.Model
+		}
+		if served != "" {
 			raw, _ := json.Marshal(served)
 			_, _ = fmt.Fprintf(writer,
 				"event: response.created\ndata: {\"response\":{\"id\":\"r1\",\"model\":%s}}\n\n", raw)
@@ -267,8 +276,8 @@ func TestValidateConfigNormalizesEmptyObject(t *testing.T) {
 		t.Fatalf("默认头名称 = %q", parsed.OverloadGuard.HeaderName)
 	}
 	pool := parsed.OverloadGuard.TicketPool
-	if pool.TargetStateLength != pluginconfig.DefaultTargetStateLength || pool.PoolSize != pluginconfig.DefaultPoolSize {
-		t.Fatalf("票池默认值 = 长度 %d、容量 %d", pool.TargetStateLength, pool.PoolSize)
+	if pool.PoolSize != pluginconfig.DefaultPoolSize {
+		t.Fatalf("票池默认容量 = %d", pool.PoolSize)
 	}
 	if len(pool.Models) == 0 {
 		t.Fatal("默认应当预置一批要维护票池的模型")
@@ -426,11 +435,8 @@ func TestTestConfigReportsLiveTicketStatus(t *testing.T) {
 	if board.Tickets.Valid != 1 || board.Tickets.Wanted != 1 {
 		t.Fatalf("看板票数 = %d/%d", board.Tickets.Valid, board.Tickets.Wanted)
 	}
-	if board.Guard.TargetLength != pluginconfig.DefaultTargetStateLength {
-		t.Fatalf("看板默认满血长度 = %d", board.Guard.TargetLength)
-	}
-	if board.Guard.ModelLengthOverrides != len(pluginconfig.DefaultPoolModels()) {
-		t.Fatalf("看板单独配置长度的模型数 = %d", board.Guard.ModelLengthOverrides)
+	if board.Guard.PoolSize != 1 {
+		t.Fatalf("看板池容量 = %d", board.Guard.PoolSize)
 	}
 	if len(board.Tickets.Accounts) != 1 {
 		t.Fatalf("看板账号数 = %d", len(board.Tickets.Accounts))
@@ -443,9 +449,6 @@ func TestTestConfigReportsLiveTicketStatus(t *testing.T) {
 		t.Fatalf("看板模型明细 = %+v", account.Models)
 	}
 	// 每张卡片带自己的长度口径：gpt-5-codex 不在默认覆盖表里，落到兜底值。
-	if account.Models[0].TargetLength != pluginconfig.DefaultTargetStateLength {
-		t.Fatalf("看板卡片口径 = %d", account.Models[0].TargetLength)
-	}
 	if account.Models[0].FreshestSeconds <= 0 {
 		t.Fatalf("看板应当报出剩余有效期: %+v", account.Models[0])
 	}
@@ -549,7 +552,7 @@ func TestHealthCarriesDashboardStatusJSON(t *testing.T) {
 	if len(board.Tickets.Accounts) != 1 || board.Tickets.Accounts[0].AccountID != testAccountID {
 		t.Fatalf("看板账号 = %+v", board.Tickets.Accounts)
 	}
-	if !board.Guard.Enabled || board.Guard.TargetLength != pluginconfig.DefaultTargetStateLength {
+	if !board.Guard.Enabled || board.Guard.PoolSize != 1 {
 		t.Fatalf("看板总览 = %+v", board.Guard)
 	}
 	// Health 拿不到宿主存的那份配置，无从比对，所以 synced 必须缺省而不是谎报为真。
@@ -599,14 +602,14 @@ func TestTestConfigFlagsUnappliedConfig(t *testing.T) {
 	}
 }
 
-// 撞到的 state 长度不等于该模型的满血长度时，池会一直是空的。
+// 上游换模型服务时池会一直是空的。
 // 这不是「还在预热」，必须报成失败并给出可操作的排查方向。
 func TestTestConfigReportsNoHealthyTicket(t *testing.T) {
 	server, gateway := newGuardedServer(t)
-	gateway.length.Store(312)
+	gateway.served.Store("gpt-5.6-luna")
 	harvest(server, gateway)
 	if added := server.state().tickets.Refill(context.Background(), testAccountID, testModel); added != 0 {
-		t.Fatalf("长度不符的票不应入池，却入了 %d 张", added)
+		t.Fatalf("上游换了模型，票不应入池，却入了 %d 张", added)
 	}
 	// 撞不到满血票会换出口重试 retry_rounds 轮，所以一次 Refill 会发 1+3 次探针。
 	if probes := gateway.calls.Load(); probes != 1+pluginconfig.DefaultRetryRounds {
@@ -622,18 +625,18 @@ func TestTestConfigReportsNoHealthyTicket(t *testing.T) {
 		t.Fatalf("撞过一轮却一张票都没有时应当失败: %s", result.GetMessage())
 	}
 	human, board := splitDashboard(t, result.GetMessage())
-	if !strings.Contains(human, "满血票长度") {
-		t.Fatalf("应当提示检查满血票长度: %q", human)
+	if !strings.Contains(human, "上游正在用别的模型服务这些请求") {
+		t.Fatalf("应当指出是上游换了模型: %q", human)
 	}
 	if board.Tickets.Valid != 0 {
 		t.Fatalf("看板票数 = %d", board.Tickets.Valid)
 	}
 	models := board.Tickets.Accounts[0].Models
-	if len(models) != 1 || models[0].Grades["mismatch"] != 1+pluginconfig.DefaultRetryRounds {
-		t.Fatalf("看板应当把这几轮都记成 mismatch: %+v", models)
+	if len(models) != 1 || models[0].Grades["downgraded"] != 1+pluginconfig.DefaultRetryRounds {
+		t.Fatalf("看板应当把这几轮都记成 downgraded: %+v", models)
 	}
-	if models[0].Detail == "" || !strings.Contains(models[0].Detail, "mismatch") {
-		t.Fatalf("看板应当带上各出口的分级摘要: %q", models[0].Detail)
+	if !strings.Contains(models[0].Detail, "gpt-5.6-luna") {
+		t.Fatalf("看板摘要应当点明是谁在顶替: %q", models[0].Detail)
 	}
 }
 

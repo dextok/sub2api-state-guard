@@ -40,11 +40,8 @@ const (
 
 // 配置体量上限，防止单条配置膨胀到影响宿主加密存储。
 const (
-	MaxAccounts   = 500
-	MaxPoolModels = 16
-	// MaxModelStateLengths 是「按模型覆盖满血长度」的条数上限。比 MaxPoolModels 宽：
-	// 覆盖表也可以给 follow_observed_models 自动跟踪出来的模型预设长度。
-	MaxModelStateLengths  = 32
+	MaxAccounts           = 500
+	MaxPoolModels         = 16
 	MaxProxyItems         = 200
 	maxExtraHeaderEntries = 64
 	maxHeaderNameBytes    = 200
@@ -91,16 +88,12 @@ const (
 
 // 票池默认值全部对齐参考实现 codex-ticket-pool（backend/app/config.py）。
 //
-// 满血票的长度因模型而异，实测：gpt-5.5 是 292，gpt-5.6-sol/terra/luna 与 gpt-6-astra
-// 都是 312。所以 DefaultTargetStateLength 只是「没有单独配置的模型」的兜底值，
-// premium 模型由 DefaultModelStateLengths 单独给 312。
+// 这里没有「满血票长度」：满血的判定标准是「HTTP 200 + 上游自报的模型与请求的模型一致」，
+// 与 state 的长度无关（长度因模型、因上游版本而异，拿它当标准只会误杀或误收）。
 const (
 	DefaultGatewayBaseURL = "https://chatgpt.com/backend-api/codex"
 	DefaultUserAgent      = "codex_cli_rs/0.154.0"
-	// DefaultTargetStateLength 是 gpt-5.5 档的满血长度，同时作为未覆盖模型的兜底。
-	DefaultTargetStateLength = 292
-	// DefaultPremiumStateLength 是 5.6 / 6 系列的满血长度。
-	DefaultPremiumStateLength     = 312
+
 	DefaultPoolSize               = 5
 	DefaultTicketTTLSeconds       = 2700
 	DefaultTicketStaggerSeconds   = 600
@@ -167,13 +160,6 @@ type Ticket struct {
 	FollowObservedModels bool `json:"follow_observed_models"`
 	// PoolSize 是每个（账号 × 模型）池维持的满血票张数。
 	PoolSize int `json:"pool_size"`
-	// TargetStateLength 是 ModelStateLengths 里没有单列的模型的满血票长度标准；
-	// 0 表示不按长度判定（任何带产出的票都入池）。
-	TargetStateLength int `json:"target_state_length"`
-	// ModelStateLengths 按模型覆盖满血票长度。满血长度因模型而异（gpt-5.5 是 292，
-	// premium 是 312），单一数字必然对其中一类是错的：口径取小了 premium 池只能收到
-	// 低一档的票，取大了 5.5 池一张也收不到。值为 0 表示该模型不按长度判定。
-	ModelStateLengths map[string]int `json:"model_state_lengths"`
 	// TicketTTLSeconds 是票入池后的有效期。上游不告诉我们真实有效期，这是经验值。
 	TicketTTLSeconds int `json:"ticket_ttl_seconds"`
 	// TicketStaggerSeconds 让同批入池的票逐张提前过期，避免整池同时到期。
@@ -263,8 +249,6 @@ func DefaultTicketPool() Ticket {
 		Models:                 DefaultPoolModels(),
 		FollowObservedModels:   true,
 		PoolSize:               DefaultPoolSize,
-		TargetStateLength:      DefaultTargetStateLength,
-		ModelStateLengths:      DefaultModelStateLengths(),
 		TicketTTLSeconds:       DefaultTicketTTLSeconds,
 		TicketStaggerSeconds:   DefaultTicketStaggerSeconds,
 		RefillThresholdSeconds: DefaultRefillThresholdSeconds,
@@ -282,26 +266,6 @@ func DefaultTicketPool() Ticket {
 // DefaultPoolModels 返回默认要维护票池的模型，与 codex-ticket-pool 的 POOL_MODELS 一致。
 func DefaultPoolModels() []string {
 	return []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra"}
-}
-
-// DefaultModelStateLengths 返回默认的按模型满血长度覆盖表。
-//
-// 默认池里那几个模型都是 5.6/6 系列，满血长度实测都是 312，和全局兜底的 292 不同；
-// 不预置这张表的话，它们的池只能收到 292 的票——那是低一档的票，注进去等于把降智钉死。
-func DefaultModelStateLengths() map[string]int {
-	out := make(map[string]int, len(DefaultPoolModels()))
-	for _, model := range DefaultPoolModels() {
-		out[model] = DefaultPremiumStateLength
-	}
-	return out
-}
-
-// TargetLengthFor 返回某个模型的满血票长度：覆盖表里有就用它，否则用全局兜底值。
-func (t Ticket) TargetLengthFor(model string) int {
-	if length, ok := t.ModelStateLengths[model]; ok {
-		return length
-	}
-	return t.TargetStateLength
 }
 
 // DefaultProxyPool 返回代理库默认参数：开着，但一条代理都没有。
@@ -347,7 +311,6 @@ func (c Config) Clone() Config {
 	out := c
 	out.ExtraHeaders = cloneHeaders(c.ExtraHeaders)
 	out.OverloadGuard.TicketPool.Models = append([]string(nil), c.OverloadGuard.TicketPool.Models...)
-	out.OverloadGuard.TicketPool.ModelStateLengths = cloneModelLengths(c.OverloadGuard.TicketPool.ModelStateLengths)
 	out.OverloadGuard.ProxyPool.Proxies = append([]ProxyItem(nil), c.OverloadGuard.ProxyPool.Proxies...)
 	out.OverloadGuard.Accounts = append([]Account(nil), c.OverloadGuard.Accounts...)
 	return out
@@ -417,14 +380,6 @@ func cloneHeaders(headers map[string]string) map[string]string {
 	out := make(map[string]string, len(headers))
 	for name, value := range headers {
 		out[name] = value
-	}
-	return out
-}
-
-func cloneModelLengths(lengths map[string]int) map[string]int {
-	out := make(map[string]int, len(lengths))
-	for model, length := range lengths {
-		out[model] = length
 	}
 	return out
 }

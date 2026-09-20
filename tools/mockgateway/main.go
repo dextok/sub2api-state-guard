@@ -9,8 +9,8 @@
 //	# 默认：292 长度的满血票 + 4 个本地 socks5 出口
 //	go run ./tools/mockgateway
 //
-//	# 让某些模型撞出 312（premium 池，判定为长度不符）与过载
-//	go run ./tools/mockgateway -mismatch-models gpt-6-astra -overloaded-models gpt-5.6-luna
+//	# 让某个模型撞出「上游换模型服务」（判定为降级）与过载
+//	go run ./tools/mockgateway -downgrade gpt-6-astra=gpt-5.6-luna -overloaded-models gpt-5.6-terra
 //
 // 插件侧对应改两处配置：网关填 http://127.0.0.1:9701/backend-api/codex，
 // 代理列表把启动日志里打印的 socks5://127.0.0.1:97xx 逐条粘进去。
@@ -55,8 +55,8 @@ const (
 
 type server struct {
 	stateLengths     []int
-	mismatchModels   map[string]struct{}
-	mismatchLength   int
+	altLengthModels  map[string]struct{}
+	altLength        int
 	overloadedModels map[string]struct{}
 	// downgradeModels 把「请求的模型」映射成「SSE 里自报的模型」，用来模拟上游的
 	// 模型降级（请求 gpt-6-astra，实际由 gpt-5.6-luna 服务）。
@@ -79,8 +79,9 @@ func main() {
 	socks5Base := flag.Int("socks5-base-port", 9750, "SOCKS5 出口的起始端口")
 	socks5Count := flag.Int("socks5-count", 4, "SOCKS5 出口个数，0 表示不开出口（只能直连撞票）")
 	stateLength := flag.String("state-length", "292", "state 头长度，逗号分隔时按请求轮换")
-	mismatchModels := flag.String("mismatch-models", "", "这些模型固定返回 -mismatch-length 长度的 state（逗号分隔）")
-	mismatchLength := flag.Int("mismatch-length", 312, "-mismatch-models 用的 state 长度")
+	altLengthModels := flag.String("alt-length-models", "",
+		"这些模型固定返回 -alt-length 长度的 state（逗号分隔）；长度不参与满血判定，用来验证这一点")
+	altLength := flag.Int("alt-length", 312, "-alt-length-models 用的 state 长度")
 	overloadedModels := flag.String("overloaded-models", "", "这些模型固定回过载事件（逗号分隔）")
 	downgradeModels := flag.String("downgrade", "",
 		"模拟上游模型降级，形如 gpt-6-astra=gpt-5.6-luna（逗号分隔多条）："+
@@ -120,8 +121,8 @@ func main() {
 
 	instance := &server{
 		stateLengths:     lengths,
-		mismatchModels:   parseSet(*mismatchModels),
-		mismatchLength:   *mismatchLength,
+		altLengthModels:  parseSet(*altLengthModels),
+		altLength:        *altLength,
 		overloadedModels: parseSet(*overloadedModels),
 		downgradeModels:  downgrades,
 		noState:          *noState,
@@ -311,11 +312,11 @@ func (s *server) note() (int, string) {
 	return s.probes, gap
 }
 
-// stateLengthFor 决定这次给多长的 state：命中 -mismatch-models 用固定长度，
+// stateLengthFor 决定这次给多长的 state：命中 -alt-length-models 用固定长度，
 // 否则按 -state-length 列表轮换。
 func (s *server) stateLengthFor(model string) int {
-	if _, hit := s.mismatchModels[strings.ToLower(strings.TrimSpace(model))]; hit {
-		return s.mismatchLength
+	if _, hit := s.altLengthModels[strings.ToLower(strings.TrimSpace(model))]; hit {
+		return s.altLength
 	}
 	if len(s.stateLengths) == 1 {
 		return s.stateLengths[0]

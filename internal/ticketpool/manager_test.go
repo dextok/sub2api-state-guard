@@ -73,7 +73,7 @@ type managerHarness struct {
 func newManagerHarness(t *testing.T, tune func(*pluginconfig.Ticket), proxies ProxyProvider) *managerHarness {
 	t.Helper()
 	stub := newCaptureStub(t)
-	stub.reply(http.StatusOK, state(292), sseText)
+	stub.replyServed(http.StatusOK, state(292))
 
 	ticket := pluginconfig.DefaultTicketPool()
 	ticket.Models = []string{"gpt-5-codex"}
@@ -181,39 +181,39 @@ func TestRefillFillsPoolAndServesValue(t *testing.T) {
 	}
 }
 
-// 满血长度按模型不同，所以同一个账号下两个池各按各的口径收票：
-// 上游回 312 时，口径 312 的池收得到，落到兜底 292 的池一张也收不到。
-func TestRefillUsesPerModelTargetLength(t *testing.T) {
+// 上游换模型服务时，那个池一张票都收不到；被上游正常服务的模型不受影响。
+// 长度在这里帮不上忙——两边铸出来的 state 一样长。
+func TestRefillRejectsTicketsFromAnotherModel(t *testing.T) {
 	harness := newManagerHarness(t, func(ticket *pluginconfig.Ticket) {
-		ticket.Models = []string{"gpt-5-codex", "gpt-6-astra"}
-		ticket.TargetStateLength = 292
-		ticket.ModelStateLengths = map[string]int{"gpt-6-astra": 312}
+		ticket.Models = []string{"gpt-5.6-luna", "gpt-6-astra"}
 	}, nil)
 	harness.harvest(managedAccount)
-	harness.stub.reply(http.StatusOK, state(312), sseText)
+	// 假桩一律自报 luna：请求 astra 时就是「上游换了模型」。
+	harness.stub.reply(http.StatusOK, state(312), sseCreatedAs("gpt-5.6-luna")+sseText)
 
-	if added := harness.manager.Refill(context.Background(), managedAccount, "gpt-6-astra"); added != 1 {
-		t.Fatalf("astra 的口径是 312，应当补入 1 张，实际 %d 张", added)
+	if added := harness.manager.Refill(context.Background(), managedAccount, "gpt-6-astra"); added != 0 {
+		t.Fatalf("上游用 luna 服务 astra，不该有票入池，实际 %d 张", added)
 	}
-	if added := harness.manager.Refill(context.Background(), managedAccount, "gpt-5-codex"); added != 0 {
-		t.Fatalf("gpt-5-codex 落到兜底的 292，312 的票不该入池，实际补入 %d 张", added)
+	if added := harness.manager.Refill(context.Background(), managedAccount, "gpt-5.6-luna"); added != 1 {
+		t.Fatalf("luna 是上游真正在服务的模型，应当补入 1 张，实际 %d 张", added)
 	}
-	if value, ok := harness.manager.Value(managedAccount, "gpt-6-astra"); !ok || len(value) != 312 {
-		t.Fatalf("astra 应当取到一张 312 的票，ok=%v 长度=%d", ok, len(value))
+	if _, ok := harness.manager.Value(managedAccount, "gpt-6-astra"); ok {
+		t.Fatal("astra 池是空的，不该取到票")
 	}
-	if _, ok := harness.manager.Value(managedAccount, "gpt-5-codex"); ok {
-		t.Fatal("gpt-5-codex 池是空的，不该取到票")
+	if value, ok := harness.manager.Value(managedAccount, "gpt-5.6-luna"); !ok || len(value) != 312 {
+		t.Fatalf("luna 应当取到票，ok=%v 长度=%d", ok, len(value))
 	}
 
-	// 每张卡片都要带自己的口径，否则看板上「满血」二字没法核对。
-	want := map[string]int{"gpt-5-codex": 292, "gpt-6-astra": 312}
-	models := harness.manager.Status().Accounts[0].Models
-	if len(models) != len(want) {
-		t.Fatalf("卡片数 = %d，期望 %d", len(models), len(want))
-	}
-	for _, model := range models {
-		if model.TargetLength != want[model.Model] {
-			t.Fatalf("%s 卡片的口径 = %d，期望 %d", model.Model, model.TargetLength, want[model.Model])
+	status := harness.manager.Status().Accounts[0]
+	for _, model := range status.Models {
+		if model.Model != "gpt-6-astra" {
+			continue
+		}
+		if model.Grades[string(GradeDowngraded)] == 0 {
+			t.Fatalf("astra 卡片应当记着降级计数: %+v", model.Grades)
+		}
+		if !strings.Contains(model.Detail, "gpt-5.6-luna") {
+			t.Fatalf("astra 卡片的摘要应当点明是谁在顶替: %q", model.Detail)
 		}
 	}
 }
@@ -227,8 +227,8 @@ func TestRefillRetriesWithFreshProxies(t *testing.T) {
 		ticket.RetryRounds = 2
 	}, proxies)
 	harness.harvest(managedAccount)
-	// 全是 312：有产出但长度不符，一张也入不了池。
-	harness.stub.reply(http.StatusOK, state(312), sseText)
+	// 上游一律用别的模型服务，一张也入不了池。
+	harness.stub.reply(http.StatusOK, state(312), sseCreatedAs("gpt-5.6-luna")+sseText)
 
 	if added := harness.manager.Refill(context.Background(), managedAccount, "gpt-5-codex"); added != 0 {
 		t.Fatalf("补入 %d 张", added)
@@ -256,8 +256,8 @@ func TestRefillRetriesWithFreshProxies(t *testing.T) {
 	}
 
 	status := harness.manager.Status().Accounts[0].Models[0]
-	if status.Grades["mismatch"] != 3 {
-		t.Fatalf("分级 = %v，期望三轮各一次 mismatch", status.Grades)
+	if status.Grades["downgraded"] != 3 {
+		t.Fatalf("分级 = %v，期望三轮各一次 downgraded", status.Grades)
 	}
 	if status.Detail == "" {
 		t.Fatal("一轮没补到票时看板要给出各出口的分级摘要")
@@ -522,8 +522,8 @@ func TestReconcileStopsPoolsWhenCredentialGoesAway(t *testing.T) {
 }
 
 func TestFormatGradesIsStable(t *testing.T) {
-	got := formatGrades(map[Grade]int{GradeMismatch: 3, GradeHealthy: 1, GradeError: 2})
-	if got != "error=2 healthy=1 mismatch=3" {
+	got := formatGrades(map[Grade]int{GradeUnverified: 3, GradeHealthy: 1, GradeError: 2})
+	if got != "error=2 healthy=1 unverified=3" {
 		t.Fatalf("格式化结果 = %q", got)
 	}
 }

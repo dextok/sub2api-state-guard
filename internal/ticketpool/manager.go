@@ -174,18 +174,15 @@ func (m *Manager) Enabled(accountID int64) bool {
 
 // Ready 表示账号已有至少一张有效票（不保证是某个具体模型的）。
 func (m *Manager) Ready(accountID int64) bool {
-	return m.store.Ready(accountID, m.ticket.TargetLengthFor, m.now())
+	return m.store.Ready(accountID, m.now())
 }
 
 // Value 返回该模型当前可注入的 state。
-//
-// 长度口径在取票时也要过一遍：改了该模型的满血长度之后，没有循环在维护的池
-// （配置里删掉的模型、过期的自动跟踪模型）不会再被 Plan 清理，旧口径的票不能继续注入。
 func (m *Manager) Value(accountID int64, model string) (string, bool) {
 	if !m.Enabled(accountID) {
 		return "", false
 	}
-	return m.store.Pick(accountID, model, m.ticket.TargetLengthFor(model), m.now())
+	return m.store.Pick(accountID, model, m.now())
 }
 
 // Observe 记录账号实际用到的模型；配置里没写的模型也能因此获得自己的池。
@@ -333,9 +330,8 @@ func (m *Manager) Refill(ctx context.Context, accountID int64, model string) int
 	}
 
 	settings := m.ticket
-	targetLength := settings.TargetLengthFor(model)
 	plan := m.store.Plan(accountID, model, settings.PoolSize,
-		settings.RefillThresholdSeconds, targetLength, m.now())
+		settings.RefillThresholdSeconds, m.now())
 	if plan.Need == 0 {
 		m.store.NoteRound(accountID, model, plan.Reason, 0, nil, "", m.now())
 		return 0
@@ -347,7 +343,6 @@ func (m *Manager) Refill(ctx context.Context, accountID int64, model string) int
 		StaggerSeconds: settings.TicketStaggerSeconds,
 		MinTTLSeconds:  pluginconfig.MinTicketTTLSeconds,
 		Size:           settings.PoolSize,
-		TargetLength:   targetLength,
 	}
 	if plan.Replace {
 		// 一换一：允许临时超存一张，StoreRound 末尾会把最快过期的那张裁掉。
@@ -495,9 +490,6 @@ func (m *Manager) Status() Status {
 			account.CredentialSeconds = int(now.Sub(cred.UpdatedAt) / time.Second)
 		}
 		account.Models = m.withConfiguredModels(m.store.ModelStatuses(accountID, m.ticket.PoolSize, now))
-		for index := range account.Models {
-			account.Models[index].TargetLength = m.ticket.TargetLengthFor(account.Models[index].Model)
-		}
 		for _, model := range account.Models {
 			status.Valid += model.Valid
 			status.Wanted += m.ticket.PoolSize
@@ -540,7 +532,7 @@ func markTried(tried map[string]struct{}, addrs []string) {
 	}
 }
 
-// formatGrades 给日志用的稳定顺序输出，例如 "healthy=1 mismatch=3"。
+// formatGrades 给日志用的稳定顺序输出，例如 "healthy=1 downgraded=3"。
 func formatGrades(grades map[Grade]int) string {
 	names := make([]string, 0, len(grades))
 	for grade := range grades {

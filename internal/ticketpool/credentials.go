@@ -1,6 +1,6 @@
 // Package ticketpool 在插件进程内自建算力票（x-codex-turn-state）池：
 // 用从过路请求里采到的账号凭据，经代理库（http/https/socks5/socks5h）轮换出口向 codex 网关
-// 发探针「撞票」，只把满血票（长度等于 target_state_length）按 (账号 × 模型) 收进池子，转发时就地注入。
+// 发探针「撞票」，只把满血票（200 且上游自报的模型与请求的一致）按 (账号 × 模型) 收进池子，转发时就地注入。
 //
 // 算法对齐参考实现 codex-ticket-pool（backend/app/capture.py），见 capture.go 与 store.go。
 // 插件没有可写目录，票池与凭据都只存在于内存里，进程重启后重新积累。

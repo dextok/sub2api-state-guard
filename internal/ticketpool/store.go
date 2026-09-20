@@ -51,9 +51,8 @@ func NewStore() *Store {
 // Pick 取 (账号, 模型) 池里最新的一张有效票。
 //
 // 取最新而不是最快过期的：新票剩余有效期最长，能撑过更长的流式请求。
-// 票不会被消费，有效期内可重复注入。targetLength 非 0 时只认长度相符的票，
-// 这样改了满血长度之后，没有循环在维护的池也不会继续注入旧口径的票。
-func (s *Store) Pick(accountID int64, model string, targetLength int, now time.Time) (string, bool) {
+// 票不会被消费，有效期内可重复注入。
+func (s *Store) Pick(accountID int64, model string, now time.Time) (string, bool) {
 	if model == "" {
 		return "", false
 	}
@@ -66,7 +65,7 @@ func (s *Store) Pick(accountID int64, model string, targetLength int, now time.T
 	var best *ticket
 	for index := range pool.tickets {
 		item := &pool.tickets[index]
-		if !usable(item, now, targetLength) {
+		if !usable(item, now) {
 			continue
 		}
 		if best == nil || item.createdAt.After(best.createdAt) {
@@ -81,19 +80,16 @@ func (s *Store) Pick(accountID int64, model string, targetLength int, now time.T
 	return best.state, true
 }
 
-// Ready 表示账号至少有一张仍在有效期内、长度也相符的票（不保证是某个具体模型的）。
-//
-// 满血长度按模型配置，所以这里不能用一个数字扫全部池：每个池都要拿自己模型的口径来判。
-func (s *Store) Ready(accountID int64, targetFor func(model string) int, now time.Time) bool {
+// Ready 表示账号至少有一张仍在有效期内的票（不保证是某个具体模型的）。
+func (s *Store) Ready(accountID int64, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, pool := range s.pools {
 		if key.account != accountID {
 			continue
 		}
-		targetLength := targetFor(key.model)
 		for index := range pool.tickets {
-			if usable(&pool.tickets[index], now, targetLength) {
+			if usable(&pool.tickets[index], now) {
 				return true
 			}
 		}
@@ -101,12 +97,11 @@ func (s *Store) Ready(accountID int64, targetFor func(model string) int, now tim
 	return false
 }
 
-// usable 判断一张票现在还能不能注入：没过期，且长度符合当前口径。
-func usable(item *ticket, now time.Time, targetLength int) bool {
-	if !now.Before(item.expiresAt) {
-		return false
-	}
-	return targetLength == 0 || item.length == targetLength
+// usable 判断一张票现在还能不能注入：只看有没有过期。
+//
+// 入池那一关已经确认过它是满血票（200 + 模型对得上），池里不再复查。
+func usable(item *ticket, now time.Time) bool {
+	return now.Before(item.expiresAt)
 }
 
 // Valid 返回某个池里仍然有效的票数。
@@ -182,13 +177,13 @@ type Plan struct {
 //  3. 池已满 → 剩余有效期最长的一张也不足 threshold 才补，且补到后一换一。
 //
 // 同批入池的票过期时间已经错开，不会整池同时到期。
-func (s *Store) Plan(accountID int64, model string, size, thresholdSeconds, targetLength int, now time.Time) Plan {
+func (s *Store) Plan(accountID int64, model string, size, thresholdSeconds int, now time.Time) Plan {
 	threshold := time.Duration(thresholdSeconds) * time.Second
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pool := s.ensureLocked(poolKey{accountID, model})
-	purgeLocked(pool, now, targetLength)
+	purgeLocked(pool, now)
 
 	valid := len(pool.tickets)
 	if valid == 0 {
@@ -230,8 +225,6 @@ type StoreParams struct {
 	MinTTLSeconds int
 	// Size 是池的目标容量，入池后按它裁剪。
 	Size int
-	// TargetLength 是满血票长度，0 表示不按长度判定。
-	TargetLength int
 }
 
 // StoreRound 把一轮撞票结果写进池：只收满血票，按 state 去重，逐张错开过期时间。
@@ -240,7 +233,7 @@ func (s *Store) StoreRound(accountID int64, model string, records []record, para
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pool := s.ensureLocked(poolKey{accountID, model})
-	purgeLocked(pool, now, params.TargetLength)
+	purgeLocked(pool, now)
 
 	existing := make(map[string]struct{}, len(pool.tickets))
 	for _, item := range pool.tickets {
@@ -306,17 +299,11 @@ func (s *Store) ensureLocked(key poolKey) *poolState {
 	return pool
 }
 
-// purgeLocked 清理过期票与长度不符的票。
-//
-// 长度判定要在这里再做一次：管理员改了该模型的满血长度之后，
-// 旧口径下收进来的票就不该继续被注入。
-func purgeLocked(pool *poolState, now time.Time, targetLength int) {
+// purgeLocked 清理过期票。
+func purgeLocked(pool *poolState, now time.Time) {
 	kept := pool.tickets[:0]
 	for _, item := range pool.tickets {
 		if !now.Before(item.expiresAt) {
-			continue
-		}
-		if targetLength != 0 && item.length != targetLength {
 			continue
 		}
 		kept = append(kept, item)

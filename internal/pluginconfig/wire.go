@@ -42,22 +42,26 @@ type wireGuard struct {
 }
 
 type wireTicket struct {
-	Models                 *[]string       `json:"models"`
-	FollowObservedModels   *bool           `json:"follow_observed_models"`
-	PoolSize               *int            `json:"pool_size"`
-	TargetStateLength      *int            `json:"target_state_length"`
-	ModelStateLengths      *map[string]int `json:"model_state_lengths"`
-	TicketTTLSeconds       *int            `json:"ticket_ttl_seconds"`
-	TicketStaggerSeconds   *int            `json:"ticket_stagger_seconds"`
-	RefillThresholdSeconds *int            `json:"refill_threshold_seconds"`
-	CheckIntervalSeconds   *int            `json:"check_interval_seconds"`
-	ProbeTimeoutSeconds    *int            `json:"probe_timeout_seconds"`
-	ProbeEffort            *string         `json:"probe_effort"`
-	ProxiesPerRound        *int            `json:"proxies_per_round"`
-	RetryRounds            *int            `json:"retry_rounds"`
-	IncludeDirect          *bool           `json:"include_direct"`
-	GatewayBaseURL         *string         `json:"gateway_base_url"`
-	UserAgent              *string         `json:"user_agent"`
+	Models                 *[]string `json:"models"`
+	FollowObservedModels   *bool     `json:"follow_observed_models"`
+	PoolSize               *int      `json:"pool_size"`
+	TicketTTLSeconds       *int      `json:"ticket_ttl_seconds"`
+	TicketStaggerSeconds   *int      `json:"ticket_stagger_seconds"`
+	RefillThresholdSeconds *int      `json:"refill_threshold_seconds"`
+	CheckIntervalSeconds   *int      `json:"check_interval_seconds"`
+	ProbeTimeoutSeconds    *int      `json:"probe_timeout_seconds"`
+	ProbeEffort            *string   `json:"probe_effort"`
+	ProxiesPerRound        *int      `json:"proxies_per_round"`
+	RetryRounds            *int      `json:"retry_rounds"`
+	IncludeDirect          *bool     `json:"include_direct"`
+	GatewayBaseURL         *string   `json:"gateway_base_url"`
+	UserAgent              *string   `json:"user_agent"`
+
+	// 已移除的字段：满血判定曾经看 state 长度（全局一个数，后来改成按模型一张表），
+	// 现在的标准是「200 + 上游自报的模型与请求的一致」，长度不再参与。
+	// 旧配置里还留着这两个键，接受并忽略，下一次保存时它们就会从存储里消失。
+	TargetStateLength *json.RawMessage `json:"target_state_length"`
+	ModelStateLengths *json.RawMessage `json:"model_state_lengths"`
 }
 
 type wireProxy struct {
@@ -149,11 +153,6 @@ func (w wireTicket) merge(base Ticket) Ticket {
 	}
 	mergeBool(&out.FollowObservedModels, w.FollowObservedModels)
 	mergeInt(&out.PoolSize, w.PoolSize)
-	mergeInt(&out.TargetStateLength, w.TargetStateLength)
-	// 显式给了这个键就整表替换（包括给成 {} 表示"全都跟随全局值"）；没给才保留默认表。
-	if w.ModelStateLengths != nil {
-		out.ModelStateLengths = cloneModelLengths(*w.ModelStateLengths)
-	}
 	mergeInt(&out.TicketTTLSeconds, w.TicketTTLSeconds)
 	mergeInt(&out.TicketStaggerSeconds, w.TicketStaggerSeconds)
 	mergeInt(&out.RefillThresholdSeconds, w.RefillThresholdSeconds)

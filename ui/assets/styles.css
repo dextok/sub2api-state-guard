@@ -644,45 +644,6 @@ td.col-actions {
   word-break: break-word;
 }
 
-.status-proxies:empty {
-  display: none;
-}
-
-.status-subhead {
-  font-weight: 600;
-  font-size: 12px;
-  margin-bottom: 6px;
-}
-
-.proxy-status-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.proxy-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  font-size: 12px;
-}
-
-.proxy-status-name {
-  font-weight: 600;
-  min-width: 120px;
-}
-
-.proxy-status-mode {
-  color: var(--text-muted);
-}
-
-.proxy-status-state {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  color: var(--text-muted);
-  word-break: break-all;
-}
-
 @media (max-width: 560px) {
   .page {
     padding: 12px;

@@ -260,11 +260,6 @@ type guardSummary struct {
 	HeaderName string `json:"header_name"`
 	Accounts   int    `json:"accounts"`
 	PoolSize   int    `json:"pool_size"`
-	// TargetLength 是没有单独配置的模型的满血长度；每个模型自己的口径在
-	// ticketpool.ModelStatus.TargetLength 上。
-	TargetLength int `json:"target_state_length"`
-	// ModelLengthOverrides 是按模型覆盖了满血长度的条数。
-	ModelLengthOverrides int `json:"model_length_overrides"`
 }
 
 // snapshot 组装看板快照：只读内存状态，不发任何请求。
@@ -272,12 +267,10 @@ func snapshot(current *state, tickets ticketpool.Status, proxies proxypool.Statu
 	guard := current.config.OverloadGuard
 	return dashboard{
 		Guard: guardSummary{
-			Enabled:              guard.Enabled,
-			HeaderName:           guard.HeaderName,
-			Accounts:             len(tickets.Accounts),
-			PoolSize:             guard.TicketPool.PoolSize,
-			TargetLength:         guard.TicketPool.TargetStateLength,
-			ModelLengthOverrides: len(guard.TicketPool.ModelStateLengths),
+			Enabled:    guard.Enabled,
+			HeaderName: guard.HeaderName,
+			Accounts:   len(tickets.Accounts),
+			PoolSize:   guard.TicketPool.PoolSize,
 		},
 		Tickets: tickets,
 		Proxies: proxies,
@@ -359,14 +352,15 @@ func summarize(config pluginconfig.Config, tickets ticketpool.Status,
 		return true, append(lines, "过载防护已开启，但还没有账号被接管，不会有任何撞票流量。")
 	}
 
-	lines = append(lines, fmt.Sprintf("票池：%d/%d 张有效（%d 个账号，每个模型目标 %d 张，%s）。",
-		tickets.Valid, tickets.Wanted, len(tickets.Accounts),
-		guard.TicketPool.PoolSize, formatTargetLength(guard.TicketPool)))
+	lines = append(lines, fmt.Sprintf("票池：%d/%d 张有效（%d 个账号，每个模型目标 %d 张，"+
+		"满血标准：HTTP 200 且上游返回的模型与请求的一致）。",
+		tickets.Valid, tickets.Wanted, len(tickets.Accounts), guard.TicketPool.PoolSize))
 	lines = append(lines, formatProxyLine(guard.ProxyPool, proxies, guard.TicketPool.IncludeDirect))
 
 	waiting := 0
 	probed := false
 	downgraded := 0
+	unverified := 0
 	for _, account := range tickets.Accounts {
 		if !account.HasCredential {
 			waiting++
@@ -376,6 +370,7 @@ func summarize(config pluginconfig.Config, tickets ticketpool.Status,
 				probed = true
 			}
 			downgraded += model.Grades[string(ticketpool.GradeDowngraded)]
+			unverified += model.Grades[string(ticketpool.GradeUnverified)]
 		}
 	}
 	if waiting > 0 {
@@ -394,30 +389,21 @@ func summarize(config pluginconfig.Config, tickets ticketpool.Status,
 	success := true
 	if probed && tickets.Valid == 0 {
 		success = false
-		// 全是 downgraded 时「调长度」是错的建议：上游压根没在用这个模型服务，
-		// 换多少长度都收不到属于它的票。
-		if downgraded > 0 {
+		switch {
+		case downgraded > 0:
 			lines = append(lines, "已经撞过至少一轮但一张满血票都没有：上游正在用别的模型服务这些请求"+
 				"（见上面的「降级」计数），这是账号在上游的模型权限问题，插件层改不了；"+
 				"先确认账号是否被限流或降级。")
-		} else {
+		case unverified > 0:
+			lines = append(lines, "已经撞过至少一轮但一张满血票都没有：上游没有回报模型名"+
+				"（见上面的「未确认」计数），确认不了撞到的票属于哪个模型，所以一张都没收；"+
+				"先确认网关地址填的是不是真正的 codex 网关。")
+		default:
 			lines = append(lines, "已经撞过至少一轮但一张满血票都没有：请检查代理库是否可用、"+
-				"账号是否被限流，或把该模型的「满血票长度」调整为上游当前实际返回的长度。")
+				"账号是否被限流，或看各模型卡片上的分级明细。")
 		}
 	}
 	return success, lines
-}
-
-// formatTargetLength 描述满血长度口径：一个默认值，外加按模型覆盖的条数。
-func formatTargetLength(ticket pluginconfig.Ticket) string {
-	base := "默认满血长度 不限"
-	if ticket.TargetStateLength != 0 {
-		base = fmt.Sprintf("默认满血长度 %d", ticket.TargetStateLength)
-	}
-	if count := len(ticket.ModelStateLengths); count > 0 {
-		return fmt.Sprintf("%s，另有 %d 个模型单独配置", base, count)
-	}
-	return base
 }
 
 func formatProxyLine(config pluginconfig.Proxy, status proxypool.Status, includeDirect bool) string {
@@ -556,8 +542,8 @@ func describeConfig(config pluginconfig.Config) string {
 	}
 	pool := guard.TicketPool
 	return fmt.Sprintf("过载防护已开启：%d 个账号自建票池并按模型注入 %s；每个模型 %d 张、有效期 %d 秒、"+
-		"%s，每 %d 秒检查一次；模型 %s；覆盖模式 %s，无可用值时 %s，模型未匹配时 %s。",
-		enabled, guard.HeaderName, pool.PoolSize, pool.TicketTTLSeconds, formatTargetLength(pool),
+		"满血标准为 200 且模型一致，每 %d 秒检查一次；模型 %s；覆盖模式 %s，无可用值时 %s，模型未匹配时 %s。",
+		enabled, guard.HeaderName, pool.PoolSize, pool.TicketTTLSeconds,
 		pool.CheckIntervalSeconds, describeModels(pool), guard.OverrideMode,
 		guard.OnUnavailable, guard.OnModelUnmatched)
 }

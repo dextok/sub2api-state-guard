@@ -18,23 +18,25 @@ import (
 	"github.com/dextok/sub2api-state-guard/internal/proxypool"
 )
 
-// Grade 是一次探针结果的分级，取值与判定标准对齐参考实现：
+// Grade 是一次探针结果的分级：
 //
-//	healthy    满血：200 + 有产出 + 上游确实用请求的模型服务 + 长度符合该模型口径 —— 唯一入池
+//	healthy    满血：200 + 有产出 + 上游自报的模型与请求的模型一致 —— 唯一入池
 //	downgraded 上游实际返回的模型与请求的不是同一个（例如请求 gpt-6-astra 却由
 //	           gpt-5.6-luna 服务），这张票不属于该模型，不入池
-//	mismatch   长度不等于该模型的满血长度，不入池
+//	unverified 200 + 有产出，但上游没回报模型名，确认不了这是不是该模型的票，不入池
 //	overloaded 过载：SSE error 里带 overload，上游明确表示这个节点现在不接活
 //	weak       非 200 但带回了 state 头
 //	blocked    非 200 且没有 state 头
 //	partial    200 但既无产出也未完成
 //	error      连接异常等，连响应都没拿到
+//
+// state 的长度不参与判定：它因模型、因上游版本而异，拿它当标准只会误杀或误收。
 type Grade string
 
 const (
 	GradeHealthy    Grade = "healthy"
 	GradeDowngraded Grade = "downgraded"
-	GradeMismatch   Grade = "mismatch"
+	GradeUnverified Grade = "unverified"
 	GradeOverloaded Grade = "overloaded"
 	GradeWeak       Grade = "weak"
 	GradeBlocked    Grade = "blocked"
@@ -46,7 +48,7 @@ const (
 //
 // 入池只看 healthy（见 Store.StoreRound），其余分级的先后只影响摘要与日志里的展示顺序。
 var gradeRank = map[Grade]int{
-	GradeHealthy: 0, GradeWeak: 1, GradeMismatch: 2, GradeDowngraded: 3,
+	GradeHealthy: 0, GradeWeak: 1, GradeUnverified: 2, GradeDowngraded: 3,
 	GradePartial: 4, GradeOverloaded: 5, GradeBlocked: 6, GradeError: 7,
 }
 
@@ -92,8 +94,6 @@ type prober struct {
 // （http/https/socks5/socks5h）拨号，为空则直连。
 func (p *prober) probe(ctx context.Context, cred Credential, model, proxyURL string) record {
 	out := record{proxy: proxyURL, grade: GradeError}
-	// 满血长度按模型配置：gpt-5.5 是 292，5.6/6 系列是 312。
-	targetLength := p.config.TargetLengthFor(model)
 
 	client, err := p.clients.Client(proxyURL)
 	if err != nil {
@@ -158,10 +158,17 @@ func (p *prober) probe(ctx context.Context, cred Credential, model, proxyURL str
 		return out
 	}
 	if stream.hasText || (stream.completed && !stream.completedFailed) {
-		// 先看上游到底用哪个模型服务的。降级时（例如账号的 gpt-6-astra 权限被收走，
-		// 上游改用 gpt-5.6-luna 顶上）铸出来的 state 长度和满血票一模一样，只靠长度
-		// 分不出来；把它当成满血票收进 astra 池再注回真实请求，只会把降智钉死。
-		if served := stream.servedModel; served != "" && served != model {
+		// 满血判定只有两条：HTTP 200 有产出，且上游自报的模型就是请求的模型。
+		//
+		// 降级时（例如账号的 gpt-6-astra 权限被收走，上游改用 gpt-5.6-luna 顶上）
+		// 铸出来的 state 和满血票长得一模一样，长度分不出来——能分出来的只有模型名。
+		served := stream.servedModel
+		switch {
+		case served == "":
+			// 上游连 model 字段都没给：确认不了这张票属于谁，宁可不收。
+			out.grade = GradeUnverified
+			out.detail = "上游没有回报模型名，无法确认这张票属于哪个模型，不入池"
+		case served != model:
 			out.grade = GradeDowngraded
 			if pluginconfig.ValidModelName(served) {
 				out.detail = detailOf(fmt.Sprintf(
@@ -170,13 +177,8 @@ func (p *prober) probe(ctx context.Context, cred Credential, model, proxyURL str
 				// served 是上游给的外部输入，detail 会经看板回到浏览器，认不出来就不回显原文。
 				out.detail = "上游返回的模型名与请求的不一致，这张票不属于该模型，不入池"
 			}
-			return out
-		}
-		// 满血判定：有产出、模型对得上，且长度等于该模型的满血长度。
-		if targetLength == 0 || out.length == targetLength {
+		default:
 			out.grade = GradeHealthy
-		} else {
-			out.grade = GradeMismatch
 		}
 		return out
 	}
@@ -433,9 +435,9 @@ func describeRecord(item record) string {
 }
 
 // summarizeRecords 汇总一轮各出口的分级，例如
-// "direct=mismatch(200/312) 1.2.*.*:1080=healthy(200/292)"。
+// "direct=downgraded(200/312) 1.2.*.*:1080=healthy(200/312)"。
 //
-// 一轮没补到票时这行会进看板：管理员据此区分「长度不符」「被挡」「连不上」。
+// 一轮没补到票时这行会进看板：管理员据此区分「被换了模型」「被挡」「连不上」。
 func summarizeRecords(records []record) string {
 	parts := make([]string, 0, len(records))
 	for _, item := range records {

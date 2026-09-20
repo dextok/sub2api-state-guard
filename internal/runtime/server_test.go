@@ -14,8 +14,8 @@ import (
 
 	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
 
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/pluginconfig"
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/proxypool"
+	"github.com/dextok/sub2api-state-guard/internal/pluginconfig"
+	"github.com/dextok/sub2api-state-guard/internal/proxypool"
 )
 
 const (

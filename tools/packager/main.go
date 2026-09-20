@@ -37,7 +37,7 @@ const (
 	manifestFilename  = "manifest.json"
 	signatureFilename = "signature.json"
 	maxArchiveFiles   = 512
-	binaryName        = "overload-guard"
+	binaryName        = "sub2api-state-guard"
 )
 
 var pluginIDPattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)+$`)
@@ -126,8 +126,8 @@ func main() {
 	}{}
 
 	flag.StringVar(&options.manifestPath, "manifest", "manifest.source.json", "清单源文件")
-	flag.StringVar(&options.moduleDir, "module", ".", "插件模块目录（含 cmd/overload-guard 与 ui/）")
-	flag.StringVar(&options.output, "output", "dist/overload-guard.s2plugin", "产物路径")
+	flag.StringVar(&options.moduleDir, "module", ".", "插件模块目录（含 cmd/sub2api-state-guard 与 ui/）")
+	flag.StringVar(&options.output, "output", "dist/sub2api-state-guard.s2plugin", "产物路径")
 	flag.StringVar(&options.targets, "targets",
 		"linux-amd64,linux-arm64,darwin-arm64,darwin-amd64,windows-amd64", "交叉编译目标，逗号分隔")
 	flag.StringVar(&options.signingKey, "signing-key", "", "Ed25519 私钥文件（keygen 生成的 .private）")

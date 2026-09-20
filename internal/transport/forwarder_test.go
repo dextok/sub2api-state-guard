@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/pluginconfig"
+	"github.com/dextok/sub2api-state-guard/internal/pluginconfig"
 )
 
 // fakeValues 模拟调度器：state 按模型存放，取值必须带模型名。

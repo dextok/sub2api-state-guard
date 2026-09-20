@@ -1,4 +1,4 @@
-module github.com/dextok/sub2api-plugin-overload-guard
+module github.com/dextok/sub2api-state-guard
 
 go 1.27.0
 

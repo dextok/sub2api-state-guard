@@ -1,5 +1,5 @@
 /*
- * Overload Guard 配置页逻辑。
+ * Sub2api State Guard 配置页逻辑。
  *
  * 只能通过 UI Bridge 读写配置：没有 fetch/XHR（CSP connect-src 'none'），
  * 也没有管理员 Token。页面维护一份草稿，保存时整份交给宿主 → 插件 ValidateConfig

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/pluginconfig"
+	"github.com/dextok/sub2api-state-guard/internal/pluginconfig"
 )
 
 const managedAccount = int64(42)

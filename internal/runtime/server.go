@@ -18,10 +18,10 @@ import (
 
 	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
 
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/pluginconfig"
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/proxypool"
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/ticketpool"
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/transport"
+	"github.com/dextok/sub2api-state-guard/internal/pluginconfig"
+	"github.com/dextok/sub2api-state-guard/internal/proxypool"
+	"github.com/dextok/sub2api-state-guard/internal/ticketpool"
+	"github.com/dextok/sub2api-state-guard/internal/transport"
 )
 
 // Capability 是本插件声明的唯一能力，必须与清单里的 capabilities 完全一致。

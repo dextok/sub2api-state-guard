@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/pluginconfig"
+	"github.com/dextok/sub2api-state-guard/internal/pluginconfig"
 )
 
 // state 头按模型铸造，不同模型之间不能复用，所以注入前必须知道本次请求用的是哪个模型。

@@ -15,8 +15,8 @@ import (
 
 	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
 
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/pluginconfig"
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/transport"
+	"github.com/dextok/sub2api-state-guard/internal/pluginconfig"
+	"github.com/dextok/sub2api-state-guard/internal/transport"
 )
 
 // fakeStream 模拟宿主侧的 Forward 双向流。

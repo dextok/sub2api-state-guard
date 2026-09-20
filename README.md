@@ -1,4 +1,4 @@
-# Overload Guard 过载防护插件
+# Sub2api State Guard
 
 为 sub2api 的 **OpenAI OAuth** 账号维护 `X-Codex-Turn-State`（算力票）并在出站时按模型注入。
 票**由插件自己撞**：插件内置撞票引擎与代理库，从过路请求里取到账号凭据后，
@@ -22,7 +22,8 @@
 
 ### 效果预览
 
-宿主插件管理页里的 Overload Guard 卡片（已启用、签名可信、兼容 0.2.7）：
+宿主插件管理页里的插件卡片（已启用、签名可信、兼容 0.2.7；截图取自 0.7.1，卡片上显示的还是改名前的
+「Overload Guard」）：
 
 ![宿主插件管理页](docs/images/plugin-page.png)
 
@@ -91,8 +92,8 @@
 ## 2. 构建与打包
 
 ```bash
-git clone https://github.com/dextok/sub2api-plugin-overload-guard.git
-cd sub2api-plugin-overload-guard
+git clone https://github.com/dextok/sub2api-state-guard.git
+cd sub2api-state-guard
 
 # 1) 生成发布者密钥（私钥 0600，只留在本地或 CI Secret 里）
 go run ./tools/keygen -out build/keys/dev-publisher -key-id overload-guard-v1
@@ -101,7 +102,7 @@ go run ./tools/keygen -out build/keys/dev-publisher -key-id overload-guard-v1
 ./build.sh -signing-key build/keys/dev-publisher.private -key-id overload-guard-v1
 
 # 3) 产物
-unzip -t dist/overload-guard.s2plugin
+unzip -t dist/sub2api-state-guard.s2plugin
 ```
 
 除了 Go 1.27 和（可选的）node 之外没有别的依赖：宿主的公开协议包
@@ -130,7 +131,7 @@ unzip -t dist/overload-guard.s2plugin
 
    改完**重启宿主**。未配置会在上传时直接报「插件发布者密钥不受信任」。
 
-2. 管理端 → 插件管理 → 上传 `dist/overload-guard.s2plugin`。
+2. 管理端 → 插件管理 → 上传 `dist/sub2api-state-guard.s2plugin`。
    安装后应显示：状态 `disabled`、签名 `trusted`、兼容性 `compatible`。
 
 3. 先打开插件的**配置页**，把代理和账号配好并保存，再回到插件管理页按需要的灰度百分比启用。
@@ -380,8 +381,8 @@ go run ./tools/mockgateway
 ## 8. 目录结构
 
 ```
-sub2api-plugin-overload-guard/
-├── cmd/overload-guard/      # go-plugin 子进程入口（身份由打包器注入）
+sub2api-state-guard/
+├── cmd/sub2api-state-guard/      # go-plugin 子进程入口（身份由打包器注入）
 ├── internal/pluginconfig/   # 配置结构、默认值、严格解析与校验
 ├── internal/ticketpool/     # 撞票探针、(账号 × 模型) 票池、凭据表、补池调度
 ├── internal/proxypool/      # 代理库：配置里那批 http/socks5 出口 + 使用统计

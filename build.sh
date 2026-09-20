@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 构建并打包 Overload Guard 插件。
+# 构建并打包 Sub2api State Guard 插件。
 #
 #   ./build.sh -signing-key build/keys/dev-publisher.private -key-id overload-guard-v1
 #
@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 
 SIGNING_KEY=""
 KEY_ID=""
-OUTPUT="dist/overload-guard.s2plugin"
+OUTPUT="dist/sub2api-state-guard.s2plugin"
 TARGETS="linux-amd64,linux-arm64,darwin-arm64,darwin-amd64,windows-amd64"
 SKIP_TESTS=0
 
@@ -21,7 +21,7 @@ usage() {
   -signing-key <path>  Ed25519 私钥（tools/keygen 生成的 .private）。
                        不提供则产出未签名包，只能装在 plugins.allow_unsigned=true 的环境。
   -key-id <id>         签名密钥 ID，需与宿主 plugins.trusted_publishers 的键一致。
-  -output <path>       产物路径，默认 dist/overload-guard.s2plugin
+  -output <path>       产物路径，默认 dist/sub2api-state-guard.s2plugin
   -targets <list>      交叉编译目标，逗号分隔，默认五个主流平台。
   -skip-tests          跳过 go vet / go test / UI 语法检查（仅用于反复调试打包）。
   -h, --help           显示本帮助。

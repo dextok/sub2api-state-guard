@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/pluginconfig"
+	"github.com/dextok/sub2api-state-guard/internal/pluginconfig"
 )
 
 // directClients 把所有探针都发到本地桩上，不经代理、不出网。

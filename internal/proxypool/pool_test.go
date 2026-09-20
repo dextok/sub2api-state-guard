@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/pluginconfig"
+	"github.com/dextok/sub2api-state-guard/internal/pluginconfig"
 )
 
 // testConfig 造一份已经规范化过的代理库配置：Pool 假定 pluginconfig 已经补好

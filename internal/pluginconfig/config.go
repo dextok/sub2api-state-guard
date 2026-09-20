@@ -1,4 +1,4 @@
-// Package pluginconfig 定义 Overload Guard 插件的配置结构、默认值与严格校验。
+// Package pluginconfig 定义 Sub2api State Guard 插件的配置结构、默认值与严格校验。
 //
 // 宿主把配置当作不透明 JSON 加密保存，校验与规范化完全由插件负责：
 // ValidateConfig 与 ApplyConfig 复用本包同一套逻辑，空对象会被规范化为全默认配置。

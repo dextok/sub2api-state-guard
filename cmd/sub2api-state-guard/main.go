@@ -1,4 +1,4 @@
-// Command overload-guard 是 Overload Guard 插件的子进程入口。
+// Command sub2api-state-guard 是 Sub2api State Guard 插件的子进程入口。
 //
 // 宿主通过 hashicorp/go-plugin 启动本进程并用 gRPC 通信，所以这里只做两件事：
 // 带上打包时注入的身份、把服务实现交给 pluginv1.Serve。
@@ -10,7 +10,7 @@ import (
 
 	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
 
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/runtime"
+	"github.com/dextok/sub2api-state-guard/internal/runtime"
 )
 
 // pluginID / pluginVersion 由打包器通过 -ldflags 从 manifest.source.json 注入。
@@ -23,7 +23,7 @@ var (
 
 func main() {
 	// 日志只能写 stderr：stdout 被 go-plugin 用来做握手。
-	logger := log.New(os.Stderr, "[overload-guard] ", log.LstdFlags|log.LUTC)
+	logger := log.New(os.Stderr, "[sub2api-state-guard] ", log.LstdFlags|log.LUTC)
 	server := runtime.New(runtime.Identity{
 		PluginID:      pluginID,
 		PluginVersion: pluginVersion,

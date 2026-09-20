@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/pluginconfig"
+	"github.com/dextok/sub2api-state-guard/internal/pluginconfig"
 )
 
 // 错误码会原样出现在宿主日志与错误信息里，保持稳定、可检索。

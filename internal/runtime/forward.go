@@ -11,7 +11,7 @@ import (
 
 	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
 
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/transport"
+	"github.com/dextok/sub2api-state-guard/internal/transport"
 )
 
 // CodeProtocolError 表示宿主发来的帧序列不符合协议。

@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/pluginconfig"
+	"github.com/dextok/sub2api-state-guard/internal/pluginconfig"
 )
 
 // entry 是库里的一条代理。url 是完整地址（scheme://[user:pass@]host:port），

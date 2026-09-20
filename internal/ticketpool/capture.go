@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/pluginconfig"
-	"github.com/dextok/sub2api-plugin-overload-guard/internal/proxypool"
+	"github.com/dextok/sub2api-state-guard/internal/pluginconfig"
+	"github.com/dextok/sub2api-state-guard/internal/proxypool"
 )
 
 // Grade 是一次探针结果的分级，取值与判定标准对齐参考实现：

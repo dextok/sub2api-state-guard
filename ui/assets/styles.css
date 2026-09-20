@@ -156,10 +156,85 @@ code {
   gap: 10px;
 }
 
-.card-note {
+.card-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 每张卡片的说明文字都收进标题右边这颗信息按钮里，悬浮（或键盘聚焦）才展开。
+   说明是「读一次就够」的东西，常驻在标题下面只会把真正要操作的控件推下去。 */
+.info {
+  position: relative;
+  display: inline-flex;
+}
+
+/* 按钮本身也要悬浮才露出来：平时全透明但仍占位、仍收 hover，
+   所以鼠标扫过标题、或直接扫到它该在的位置，都会把它唤出来。 */
+.info-btn {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.card-title:hover .info-btn,
+.info-btn:hover,
+.info-btn:focus {
+  opacity: 1;
+}
+
+.info-btn:hover,
+.info-btn:focus {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* 绝对定位，不占文档高度——展开时由 app.js 按需向宿主多要一点高度，免得被 iframe 裁掉。 */
+.info-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: -6px;
+  z-index: 5;
+  width: max-content;
+  max-width: min(520px, 70vw);
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--card);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: left;
+  font-weight: 400;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.info:hover > .info-pop,
+.info-btn:focus + .info-pop {
+  visibility: visible;
+  opacity: 1;
+}
+
+.modal-note {
   margin: 0;
   color: var(--text-muted);
   font-size: 12px;
+  line-height: 1.6;
 }
 
 .grid {

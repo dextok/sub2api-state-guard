@@ -1695,6 +1695,34 @@
 
   /* ---------- 初始化 ---------- */
 
+  // 信息气泡是绝对定位的，不撑文档高度，而 iframe 的高度是按文档算出来报给宿主的——
+  // 气泡一展开就会被下沿裁掉。这里在它露出来时按需多要一点高度，收起再报回去。
+  function bindInfoPopups() {
+    Array.prototype.forEach.call(document.querySelectorAll(".info"), function (box) {
+      var pop = box.querySelector(".info-pop");
+      if (!pop) return;
+      box.addEventListener("mouseenter", grow);
+      box.addEventListener("focusin", grow);
+      box.addEventListener("mouseleave", shrink);
+      box.addEventListener("focusout", shrink);
+
+      function grow() {
+        // 鼠标点一下按钮也会 focusin，但那时气泡未必展开（:focus 之外还有 hover 在管），
+        // 所以以实际计算样式为准，别为一个没露面的气泡白要高度。
+        if (window.getComputedStyle(pop).visibility !== "visible") return;
+        var needed = Math.ceil(pop.getBoundingClientRect().bottom - el("page").getBoundingClientRect().top) + 24;
+        if (needed <= lastHeight) return;
+        lastHeight = needed;
+        bridge.resize(needed);
+      }
+
+      function shrink() {
+        lastHeight = 0;
+        reportHeight();
+      }
+    });
+  }
+
   function bindFormEvents() {
     var ids = ["tp-effort", "guard-enabled"];
     TICKET_NUMBERS.concat(TICKET_FLAGS, PROXY_FLAGS).forEach(function (pair) {
@@ -1724,6 +1752,7 @@
     draft = normalizeConfig({});
 
     bindFormEvents();
+    bindInfoPopups();
     el("btn-save").addEventListener("click", function () {
       if (busy) return;
       save();

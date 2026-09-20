@@ -34,19 +34,24 @@
         <!-- 1. 实时票况看板 -->
         <section class="card">
           <div class="card-head">
-            <h2>实时票况</h2>
+            <div class="card-title">
+              <h2>实时票况</h2>
+              <span class="info">
+                <button type="button" class="info-btn" aria-label="关于实时票况" aria-describedby="note-status">i</button>
+                <span class="info-pop" id="note-status" role="tooltip">
+                  看板展示的是<strong>已保存并生效</strong>那份配置下的实时状态，数据全部来自插件内存，
+                  不产生任何额外出站流量。插件从过路请求里采 OAuth 凭据，所以一个账号要先有真实请求经过，
+                  它的票池才会开始预热。
+                  <strong>打开本页时会跑一次 config.test</strong>把卡片组填出来（宿主可能要求二次验证）；之后在
+                  sub2api ≥ 0.2.7 上<strong>每 10 秒经宿主的只读状态通道自动刷新一次</strong>，免二次验证、不弹任何提示；
+                  更老的宿主没有这条通道，会停掉自动刷新，改为手动点「刷新状态」（同样走 config.test）。
+                </span>
+              </span>
+            </div>
             <div class="head-actions">
               <button type="button" class="btn btn-ghost btn-sm" id="status-refresh" disabled>刷新状态</button>
             </div>
           </div>
-          <p class="card-note">
-            看板展示的是<strong>已保存并生效</strong>那份配置下的实时状态，数据全部来自插件内存，
-            不产生任何额外出站流量。插件从过路请求里采 OAuth 凭据，所以一个账号要先有真实请求经过，
-            它的票池才会开始预热。
-            <strong>打开本页时会跑一次 config.test</strong>把卡片组填出来（宿主可能要求二次验证）；之后在
-            sub2api ≥ 0.2.7 上<strong>每 10 秒经宿主的只读状态通道自动刷新一次</strong>，免二次验证、不弹任何提示；
-            更老的宿主没有这条通道，会停掉自动刷新，改为手动点「刷新状态」（同样走 config.test）。
-          </p>
           <div class="status-pills" id="status-pills"></div>
           <div class="status-accounts" id="status-accounts"></div>
           <p class="empty" id="status-empty">正在读取实时票况……</p>
@@ -55,14 +60,21 @@
 
         <!-- 2. 票池 -->
         <section class="card">
-          <h2>票池</h2>
-          <p class="card-note">
-            插件自己向网关发探针请求「撞票」：只有<strong>响应 200 有产出、且上游自报的模型
-            就是请求的那个模型</strong>的票才会入池。state 的长度不参与判定——它因模型、
-            因上游版本而异，拿它当标准只会误杀或误收。「高级设置」里的数字框留空表示恢复默认值。
-            网关地址、探针 User-Agent、「每轮也用直连打一发」用默认值即可，页面上不再展示，
-            确实要改的话走管理端的插件配置接口。
-          </p>
+          <div class="card-head">
+            <div class="card-title">
+              <h2>票池</h2>
+              <span class="info">
+                <button type="button" class="info-btn" aria-label="关于票池" aria-describedby="note-ticket">i</button>
+                <span class="info-pop" id="note-ticket" role="tooltip">
+                  插件自己向网关发探针请求「撞票」：只有<strong>响应 200 有产出、且上游自报的模型
+                  就是请求的那个模型</strong>的票才会入池。state 的长度不参与判定——它因模型、
+                  因上游版本而异，拿它当标准只会误杀或误收。「高级设置」里的数字框留空表示恢复默认值。
+                  网关地址、探针 User-Agent、「每轮也用直连打一发」用默认值即可，页面上不再展示，
+                  确实要改的话走管理端的插件配置接口。
+                </span>
+              </span>
+            </div>
+          </div>
           <div class="field field-wide model-editor">
             <span class="label">模型</span>
             <div class="chips" id="tp-model-chips"></div>
@@ -154,18 +166,23 @@
         <!-- 3. 代理池 -->
         <section class="card">
           <div class="card-head">
-            <h2>代理池</h2>
+            <div class="card-title">
+              <h2>代理池</h2>
+              <span class="info">
+                <button type="button" class="info-btn" aria-label="关于代理池" aria-describedby="note-proxy">i</button>
+                <span class="info-pop" id="note-proxy" role="tooltip">
+                  直接填写自己的代理，支持 <code>socks5</code>／<code>socks5h</code>／<code>http</code>／<code>https</code>，
+                  不写协议按 <code>socks5</code> 处理，不写端口按协议补默认端口。
+                  插件<strong>不做连通性测试、也不会自动剔除</strong>：填了就用，好坏看下面的撞票成败统计。
+                  代理只存在内存里，不会写入磁盘，日志与看板里的地址都已打码。
+                </span>
+              </span>
+            </div>
             <label class="head-switch">
               <input type="checkbox" id="pp-enabled" />
               <span>启用代理池</span>
             </label>
           </div>
-          <p class="card-note">
-            直接填写自己的代理，支持 <code>socks5</code>／<code>socks5h</code>／<code>http</code>／<code>https</code>，
-            不写协议按 <code>socks5</code> 处理，不写端口按协议补默认端口。
-            插件<strong>不做连通性测试、也不会自动剔除</strong>：填了就用，好坏看下面的撞票成败统计。
-            代理只存在内存里，不会写入磁盘，日志与看板里的地址都已打码。
-          </p>
           <div class="table-wrap">
             <table class="rows">
               <thead>
@@ -189,13 +206,18 @@
         <!-- 4. 账号 -->
         <section class="card">
           <div class="card-head">
-            <h2>账号</h2>
+            <div class="card-title">
+              <h2>账号</h2>
+              <span class="info">
+                <button type="button" class="info-btn" aria-label="关于账号" aria-describedby="note-account">i</button>
+                <span class="info-pop" id="note-account" role="tooltip">
+                  沙箱页面拿不到账号列表，这里按<strong>账号 ID</strong> 配置（ID 见管理端账号详情）。
+                  未列出的账号一律直接透传，既不注入头，也不会为它撞票。
+                </span>
+              </span>
+            </div>
             <button type="button" class="btn btn-ghost" id="account-add">+ 添加账号</button>
           </div>
-          <p class="card-note">
-            沙箱页面拿不到账号列表，这里按<strong>账号 ID</strong> 配置（ID 见管理端账号详情）。
-            未列出的账号一律直接透传，既不注入头，也不会为它撞票。
-          </p>
           <div class="table-wrap">
             <table class="rows">
               <thead>
@@ -316,7 +338,7 @@
           <button type="button" class="icon-btn" data-close="model-modal" aria-label="关闭">×</button>
         </div>
         <div class="modal-body">
-          <p class="card-note" id="model-modal-text"></p>
+          <p class="modal-note" id="model-modal-text"></p>
         </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-primary" id="model-modal-confirm">删除</button>

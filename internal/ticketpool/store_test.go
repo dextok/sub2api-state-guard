@@ -381,6 +381,58 @@ func TestModelStatusesIncludesTouchedEmptyPool(t *testing.T) {
 	}
 }
 
+// 配置页点开模型卡片要逐张列出手里的票：按撞到的先后倒序（第一张就是 Pick 会挑的那张），
+// 出口打码，state 只给指纹。
+func TestModelStatusesListsTicketsNewestFirst(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	store := NewStore()
+	params := StoreParams{Cap: 5, TTLSeconds: 2700, StaggerSeconds: 0, MinTTLSeconds: 300, Size: 5}
+	store.StoreRound(1, "m", []record{
+		{grade: GradeHealthy, state: "old-" + state(288), length: 292, proxy: "socks5://user:pass@1.2.3.4:1080"},
+	}, params, now)
+	store.StoreRound(1, "m", []record{
+		{grade: GradeHealthy, state: "new-" + state(288), length: 292},
+	}, params, now.Add(time.Minute))
+
+	status := store.ModelStatuses(1, 5, now.Add(2*time.Minute))[0]
+	if status.Valid != 2 || len(status.Tickets) != 2 {
+		t.Fatalf("票数 = %d，列表 = %+v", status.Valid, status.Tickets)
+	}
+	newest, oldest := status.Tickets[0], status.Tickets[1]
+	if !newest.InUse || oldest.InUse {
+		t.Fatalf("下次注入的应当且只应当是最新那张: %+v", status.Tickets)
+	}
+	if newest.AgeSeconds != 60 || oldest.AgeSeconds != 120 {
+		t.Fatalf("票龄 = %d / %d，期望 60 / 120", newest.AgeSeconds, oldest.AgeSeconds)
+	}
+	if newest.RemainingSeconds != 2700-60 || oldest.RemainingSeconds != 2700-120 {
+		t.Fatalf("剩余 = %d / %d", newest.RemainingSeconds, oldest.RemainingSeconds)
+	}
+	// 直连撞到的票出口留空，看板才分得出「直连」和「有出口」。
+	if newest.Proxy != "" {
+		t.Fatalf("直连票的出口 = %q，期望空", newest.Proxy)
+	}
+	if oldest.Proxy != "socks5://1.2.*.*:1080" {
+		t.Fatalf("出口未按代理库规则打码: %q", oldest.Proxy)
+	}
+	// state 原文一律不出账，凭据也不能藏在指纹里。
+	for _, item := range status.Tickets {
+		if strings.Contains(item.Fingerprint, "pass") || len(item.Fingerprint) > 20 {
+			t.Fatalf("指纹可疑: %q", item.Fingerprint)
+		}
+	}
+	if status.Tickets[1].Fingerprint == status.Tickets[0].Fingerprint {
+		t.Fatalf("两张不同的票指纹相同: %+v", status.Tickets)
+	}
+	encoded := mustJSON(t, status)
+	if strings.Contains(encoded, "new-"+state(288)) || strings.Contains(encoded, "old-"+state(288)) {
+		t.Fatalf("看板输出里有 state 原文: %s", encoded)
+	}
+	if strings.Contains(encoded, "user:pass") {
+		t.Fatalf("看板输出里有代理凭据: %s", encoded)
+	}
+}
+
 func TestNoteRoundSurfacesOnDashboard(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	store := NewStore()

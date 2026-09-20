@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "sub2api.plugin.overload-guard",
   "name": "Sub2api State Guard",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "description": "为 OpenAI OAuth 账号自建 x-codex-turn-state 算力票池：插件内置撞票引擎与 http/socks5 代理库，按模型铸票并在转发时注入，不依赖任何外部服务端",
   "author": "dextok",
   "requires": {

@@ -130,6 +130,8 @@
   var accountIndex = -1; // -1 表示新增
   var proxyIndex = -1;
   var pendingRemoveModel = ""; // 确认弹窗里待删的模型，空串表示没有
+  var ticketModalAccount = 0; // 票况弹窗正在看的 (账号 × 模型) 池
+  var ticketModalModel = "";
   var lastHeight = 0;
   var heightTimer = 0;
   var statusPending = false;
@@ -919,7 +921,8 @@
   /* ---------- 弹窗 ---------- */
 
   function anyModalOpen() {
-    return !el("account-modal").hidden || !el("proxy-modal").hidden || !el("model-modal").hidden;
+    return !el("account-modal").hidden || !el("proxy-modal").hidden
+      || !el("model-modal").hidden || !el("ticket-modal").hidden;
   }
 
   function openModal(id) {
@@ -933,6 +936,7 @@
     accountIndex = -1;
     proxyIndex = -1;
     pendingRemoveModel = "";
+    ticketModalModel = "";
     lastHeight = 0;
     reportHeight();
   }
@@ -1135,25 +1139,16 @@
   function askRemoveModel(model) {
     if (!draft || busy) return;
     var ticket = draft.overload_guard.ticket_pool;
-    var configured = ticket.models.indexOf(model) >= 0;
-    pendingRemoveModel = configured ? model : "";
+    if (ticket.models.indexOf(model) < 0) return; // 只有清单里的模型删得掉，芯片也只渲染它们
+    pendingRemoveModel = model;
 
-    var lines;
-    if (!configured) {
-      // 清单里没有它，说明它是 follow_observed_models 从真实请求里认出来的。
-      // 把它从清单里删掉这件事无从谈起，只能关掉自动跟踪。
-      lines = "「" + model + "」不在模型清单里，是「自动跟踪请求里出现的新模型」认出来的。"
-        + "要停掉它，就得关掉那个开关再保存——但那样所有自动跟踪的模型都会一起停。";
-    } else {
-      lines = "删除后插件立刻停止为「" + model + "」撞票，这个模型的请求也不再注入算力票"
-        + "（请求本身照常转发，只是不受保护）。已经撞到的票会随配置生效一起丢弃。";
-      if (ticket.follow_observed_models) {
-        lines += "注意：「自动跟踪请求里出现的新模型」是开着的，只要还有请求打这个模型，"
-          + "它就会被重新跟上、继续撞票。";
-      }
+    var lines = "删除后插件立刻停止为「" + model + "」撞票，这个模型的请求也不再注入算力票"
+      + "（请求本身照常转发，只是不受保护）。已经撞到的票会随配置生效一起丢弃。";
+    if (ticket.follow_observed_models) {
+      lines += "注意：「自动跟踪请求里出现的新模型」是开着的，只要还有请求打这个模型，"
+        + "它就会被重新跟上、继续撞票。";
     }
     el("model-modal-text").textContent = lines;
-    el("model-modal-confirm").hidden = !configured;
     openModal("model-modal");
   }
 
@@ -1303,27 +1298,26 @@
     pill(container, "注入头", guard.header_name || "—", "");
   }
 
-  function renderModelCard(model, poolSize) {
+  function renderModelCard(accountID, model, poolSize) {
     var card = node("div", "model-card model-card-actionable" + (model.pending ? " model-card-pending" : ""));
     card.setAttribute("role", "button");
     card.setAttribute("tabindex", "0");
-    card.title = "点一下停止维护 " + model.model;
+    card.title = "点一下看 " + model.model + " 手里的票";
     card.addEventListener("click", function () {
       // 卡片上有 detail 文本，选中一段再松手也会冒出 click；有选区就当没点过。
       if (window.getSelection && String(window.getSelection()) !== "") return;
-      askRemoveModel(model.model);
+      openTicketModal(accountID, model.model);
     });
     card.addEventListener("keydown", function (event) {
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
-      askRemoveModel(model.model);
+      openTicketModal(accountID, model.model);
     });
 
     var head = node("div", "model-card-head");
     head.appendChild(node("span", "model-name", model.model));
     var size = model.size || poolSize || 0;
     head.appendChild(node("span", "model-count", (model.valid || 0) + " / " + size));
-    head.appendChild(node("span", "model-card-remove", "×"));
     card.appendChild(head);
 
     var meter = node("div", "meter");
@@ -1370,6 +1364,68 @@
     return card;
   }
 
+  // findModelStatus 从最近一次看板数据里捞出某个 (账号 × 模型) 池。弹窗每次渲染都重新捞，
+  // 这样 10 秒一次的自动刷新能把开着的弹窗一起带新——不然票都过期了它还摆在那儿。
+  function findModelStatus(accountID, model) {
+    var accounts = lastPayload && lastPayload.tickets && Array.isArray(lastPayload.tickets.accounts)
+      ? lastPayload.tickets.accounts
+      : [];
+    for (var i = 0; i < accounts.length; i++) {
+      if (accounts[i].account_id !== accountID) continue;
+      var models = Array.isArray(accounts[i].models) ? accounts[i].models : [];
+      for (var j = 0; j < models.length; j++) {
+        if (models[j] && models[j].model === model) return models[j];
+      }
+    }
+    return null;
+  }
+
+  // renderTicketModal 逐张列出这个池手里的有效票。看板只带指纹与时间——state 原文是要注入的
+  // 凭据本身，插件侧压根不会把它发上来，这里也就没得可显示。
+  function renderTicketModal() {
+    var model = findModelStatus(ticketModalAccount, ticketModalModel);
+    var tickets = model && Array.isArray(model.tickets) ? model.tickets : [];
+    var size = (model && model.size)
+      || (draft && draft.overload_guard.ticket_pool.pool_size)
+      || 0;
+
+    el("ticket-modal-title").textContent = ticketModalModel + " · 账号 " + ticketModalAccount;
+    el("ticket-modal-note").textContent = tickets.length > 0
+      ? "手里有 " + tickets.length + " / " + size + " 张有效票，按撞到的先后倒序。"
+        + "下一次注入用最上面那张——取最新的一张，剩余有效期最长。"
+        + "state 原文不出插件，这里只给头 8 尾 6 的指纹。"
+      : "";
+
+    var body = el("ticket-rows");
+    body.textContent = "";
+    tickets.forEach(function (item) {
+      var row = document.createElement("tr");
+      var cell = node("td", "fingerprint", item.fingerprint || "—");
+      if (item.in_use) cell.appendChild(node("span", "tag tag-on", "下次注入"));
+      row.appendChild(cell);
+      row.appendChild(node("td", "", String(item.length || 0)));
+      row.appendChild(node("td", "", humanSeconds(item.age_seconds) + "前"));
+      row.appendChild(node("td", "", humanSeconds(item.remaining_seconds)));
+      row.appendChild(node("td", "url", item.proxy || "直连"));
+      body.appendChild(row);
+    });
+
+    var empty = el("ticket-empty");
+    empty.hidden = tickets.length > 0;
+    if (tickets.length === 0) {
+      empty.textContent = model === null
+        ? "这个模型还没有实况数据：它刚加进清单，插件正在为它建池撞票。"
+        : "现在一张有效票都没有。请求会按「没有可用票」的策略处理（默认直接透传）。";
+    }
+  }
+
+  function openTicketModal(accountID, model) {
+    ticketModalAccount = accountID;
+    ticketModalModel = model;
+    renderTicketModal();
+    openModal("ticket-modal");
+  }
+
   // mergeStatusModels 把「运行时实况」与「已生效的模型清单」并成一组卡片：
   // 先按清单顺序摆——运行时有数据的用数据，没有的做占位卡——再补上运行时里有、但清单没列的
   // （follow_observed_models 自动跟踪出来的）模型。模型的增删是即时生效的，所以刚加的模型
@@ -1414,7 +1470,7 @@
     }
     var grid = node("div", "model-grid");
     models.forEach(function (model) {
-      grid.appendChild(renderModelCard(model, poolSize));
+      grid.appendChild(renderModelCard(account.account_id, model, poolSize));
     });
     box.appendChild(grid);
     return box;
@@ -1480,6 +1536,7 @@
     collectProxyUsage(payload.proxies || {});
     renderProxies();
     renderStatusAccounts(payload);
+    if (!el("ticket-modal").hidden) renderTicketModal();
 
     var notes = [];
     // synced 只有 config.test 才判断得出（plugin.status 走 Health，宿主不带配置），
@@ -1792,7 +1849,7 @@
         closeModal(button.getAttribute("data-close"));
       });
     });
-    ["account-modal", "proxy-modal", "model-modal"].forEach(function (id) {
+    ["account-modal", "proxy-modal", "model-modal", "ticket-modal"].forEach(function (id) {
       el(id).addEventListener("click", function (event) {
         if (event.target === el(id)) closeModal(id);
       });
@@ -1800,6 +1857,7 @@
     document.addEventListener("keydown", function (event) {
       if (event.key !== "Escape") return;
       if (!el("model-modal").hidden) closeModal("model-modal");
+      else if (!el("ticket-modal").hidden) closeModal("ticket-modal");
       else if (!el("proxy-modal").hidden) closeModal("proxy-modal");
       else if (!el("account-modal").hidden) closeModal("account-modal");
     });

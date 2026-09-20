@@ -93,7 +93,7 @@
               每个「账号 × 模型」维护一个独立票池——state 按模型铸造，跨模型复用会被上游识破。
               默认就带 gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna / gpt-6-astra 四个，可自行增减，最多 16 个。
               <strong>增删即时生效</strong>：加一个就立刻开始为它撞票，删一个就立刻停止撞票与注入，
-              不需要再点下面的「保存」。上方实时票况里的卡片也可以点开删除
+              不需要再点下面的「保存」。点上方实时票况里的卡片，可以看这个模型手里都有哪些票
             </em>
           </div>
           <div class="grid">
@@ -326,6 +326,37 @@
         <div class="modal-actions">
           <button type="button" class="btn btn-primary" id="proxy-modal-confirm">确定</button>
           <button type="button" class="btn btn-ghost" data-close="proxy-modal">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 某个模型手里的票 -->
+    <div class="modal-backdrop" id="ticket-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ticket-modal-title">
+        <div class="modal-head">
+          <h2 id="ticket-modal-title">算力票</h2>
+          <button type="button" class="icon-btn" data-close="ticket-modal" aria-label="关闭">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-note" id="ticket-modal-note"></p>
+          <div class="table-wrap">
+            <table class="rows">
+              <thead>
+                <tr>
+                  <th>指纹</th>
+                  <th>长度</th>
+                  <th>票龄</th>
+                  <th>剩余</th>
+                  <th>出口</th>
+                </tr>
+              </thead>
+              <tbody id="ticket-rows"></tbody>
+            </table>
+          </div>
+          <p class="empty" id="ticket-empty" hidden></p>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-close="ticket-modal">关闭</button>
         </div>
       </div>
     </div>

@@ -58,11 +58,14 @@ type server struct {
 	mismatchModels   map[string]struct{}
 	mismatchLength   int
 	overloadedModels map[string]struct{}
-	noState          bool
-	status           int
-	sseMode          string
-	delay            time.Duration
-	requireAuth      bool
+	// downgradeModels 把「请求的模型」映射成「SSE 里自报的模型」，用来模拟上游的
+	// 模型降级（请求 gpt-6-astra，实际由 gpt-5.6-luna 服务）。
+	downgradeModels map[string]string
+	noState         bool
+	status          int
+	sseMode         string
+	delay           time.Duration
+	requireAuth     bool
 
 	mu        sync.Mutex
 	probes    int
@@ -79,6 +82,9 @@ func main() {
 	mismatchModels := flag.String("mismatch-models", "", "这些模型固定返回 -mismatch-length 长度的 state（逗号分隔）")
 	mismatchLength := flag.Int("mismatch-length", 312, "-mismatch-models 用的 state 长度")
 	overloadedModels := flag.String("overloaded-models", "", "这些模型固定回过载事件（逗号分隔）")
+	downgradeModels := flag.String("downgrade", "",
+		"模拟上游模型降级，形如 gpt-6-astra=gpt-5.6-luna（逗号分隔多条）："+
+			"请求左边的模型时，SSE 里自报右边的模型名，state 照常返回")
 	noState := flag.Bool("no-state", false, "不返回 state 头")
 	status := flag.Int("status", 200, "假网关的响应状态码")
 	sseMode := flag.String("sse", sseOK, "SSE 形态：ok / overloaded / partial / failed")
@@ -102,6 +108,11 @@ func main() {
 		log.Fatalf("-socks5-count 必须在 0-%d 之间", maxSocks5Ports)
 	}
 
+	downgrades, err := parseDowngrades(*downgradeModels)
+	if err != nil {
+		log.Fatalf("-downgrade %v", err)
+	}
+
 	exits, err := startSocks5(*socks5Base, *socks5Count)
 	if err != nil {
 		log.Fatalf("启动 SOCKS5 出口失败: %v", err)
@@ -112,6 +123,7 @@ func main() {
 		mismatchModels:   parseSet(*mismatchModels),
 		mismatchLength:   *mismatchLength,
 		overloadedModels: parseSet(*overloadedModels),
+		downgradeModels:  downgrades,
 		noState:          *noState,
 		status:           *status,
 		sseMode:          *sseMode,
@@ -210,16 +222,24 @@ func (s *server) handleResponses(writer http.ResponseWriter, request *http.Reque
 	}
 
 	mode := s.sseModeFor(probe.Model)
-	log.Printf("#%d %s model=%s effort=%s ua=%s account=%s → 200 state=%d sse=%s%s",
+	served := s.servedModelFor(model)
+	downgraded := ""
+	if served != model {
+		downgraded = fmt.Sprintf(" served=%s(降级)", served)
+	}
+	log.Printf("#%d %s model=%s effort=%s ua=%s account=%s → 200 state=%d sse=%s%s%s",
 		sequence, gap, model, orNone(probe.Reasoning.Effort),
 		orNone(request.Header.Get("User-Agent")),
 		maskAccount(request.Header.Get("ChatGpt-Account-Id")),
-		len(state), mode, incoming)
-	s.writeSSE(writer, mode)
+		len(state), mode, downgraded, incoming)
+	s.writeSSE(writer, mode, served)
 }
 
 // writeSSE 按形态写事件流。插件的读取端一确认分级就会断开，所以这里逐条 flush。
-func (s *server) writeSSE(writer http.ResponseWriter, mode string) {
+//
+// servedModel 写进 response 对象的 model 字段：真实网关就是这么自报的，
+// 插件靠它判断上游有没有偷偷换模型。
+func (s *server) writeSSE(writer http.ResponseWriter, mode, servedModel string) {
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.WriteHeader(http.StatusOK)
@@ -231,7 +251,9 @@ func (s *server) writeSSE(writer http.ResponseWriter, mode string) {
 		}
 	}
 
-	emit("response.created", `{"type":"response.created","response":{"id":"resp_mock","status":"in_progress"}}`)
+	model, _ := json.Marshal(servedModel)
+	emit("response.created", fmt.Sprintf(
+		`{"type":"response.created","response":{"id":"resp_mock","status":"in_progress","model":%s}}`, model))
 	switch mode {
 	case sseOverloaded:
 		emit("error", `{"type":"error","error":{"code":"model_overloaded","message":"model is overloaded, try again later"}}`)
@@ -241,7 +263,8 @@ func (s *server) writeSSE(writer http.ResponseWriter, mode string) {
 		emit("response.failed", `{"type":"response.failed","response":{"id":"resp_mock","status":"failed","error":{"code":"mock_failed","message":"mockgateway 按 -sse failed 返回"}}}`)
 	default:
 		emit("response.output_text.delta", `{"type":"response.output_text.delta","delta":"pong"}`)
-		emit("response.completed", `{"type":"response.completed","response":{"id":"resp_mock","status":"completed"}}`)
+		emit("response.completed", fmt.Sprintf(
+			`{"type":"response.completed","response":{"id":"resp_mock","status":"completed","model":%s}}`, model))
 	}
 }
 
@@ -309,6 +332,15 @@ func (s *server) sseModeFor(model string) string {
 		return sseOverloaded
 	}
 	return s.sseMode
+}
+
+// servedModelFor 返回 SSE 里该自报哪个模型：命中 -downgrade 就报映射后的那个，
+// 否则原样报回请求的模型。
+func (s *server) servedModelFor(model string) string {
+	if served, hit := s.downgradeModels[strings.ToLower(strings.TrimSpace(model))]; hit {
+		return served
+	}
+	return model
 }
 
 // mintState 铸一张长度精确的假票，开头带上模型名，方便一眼看出有没有拿错模型的票。
@@ -506,6 +538,25 @@ func parseSet(raw string) map[string]struct{} {
 		}
 	}
 	return out
+}
+
+// parseDowngrades 解析 -downgrade 的 "请求模型=自报模型" 列表。
+func parseDowngrades(raw string) (map[string]string, error) {
+	out := make(map[string]string)
+	for _, part := range strings.Split(raw, ",") {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		from, to, found := strings.Cut(trimmed, "=")
+		from = strings.ToLower(strings.TrimSpace(from))
+		to = strings.TrimSpace(to)
+		if !found || from == "" || to == "" {
+			return nil, fmt.Errorf("%q 不是 请求模型=自报模型 的形式", trimmed)
+		}
+		out[from] = headerSafe(to)
+	}
+	return out, nil
 }
 
 // headerSafe 把模型名收敛到能安全塞进头值与日志的字符集。

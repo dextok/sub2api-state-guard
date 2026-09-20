@@ -20,8 +20,10 @@ import (
 
 // Grade 是一次探针结果的分级，取值与判定标准对齐参考实现：
 //
-//	healthy    满血：200 + 有产出 + 长度等于 target_state_length —— 唯一入池
-//	mismatch   长度不符（如 312 = premium 池，已验收确认降智），不入池
+//	healthy    满血：200 + 有产出 + 上游确实用请求的模型服务 + 长度符合该模型口径 —— 唯一入池
+//	downgraded 上游实际返回的模型与请求的不是同一个（例如请求 gpt-6-astra 却由
+//	           gpt-5.6-luna 服务），这张票不属于该模型，不入池
+//	mismatch   长度不等于该模型的满血长度，不入池
 //	overloaded 过载：SSE error 里带 overload，上游明确表示这个节点现在不接活
 //	weak       非 200 但带回了 state 头
 //	blocked    非 200 且没有 state 头
@@ -31,6 +33,7 @@ type Grade string
 
 const (
 	GradeHealthy    Grade = "healthy"
+	GradeDowngraded Grade = "downgraded"
 	GradeMismatch   Grade = "mismatch"
 	GradeOverloaded Grade = "overloaded"
 	GradeWeak       Grade = "weak"
@@ -43,8 +46,8 @@ const (
 //
 // 入池只看 healthy（见 Store.StoreRound），其余分级的先后只影响摘要与日志里的展示顺序。
 var gradeRank = map[Grade]int{
-	GradeHealthy: 0, GradeWeak: 1, GradeMismatch: 2, GradePartial: 3,
-	GradeOverloaded: 4, GradeBlocked: 5, GradeError: 6,
+	GradeHealthy: 0, GradeWeak: 1, GradeMismatch: 2, GradeDowngraded: 3,
+	GradePartial: 4, GradeOverloaded: 5, GradeBlocked: 6, GradeError: 7,
 }
 
 const (
@@ -89,6 +92,8 @@ type prober struct {
 // （http/https/socks5/socks5h）拨号，为空则直连。
 func (p *prober) probe(ctx context.Context, cred Credential, model, proxyURL string) record {
 	out := record{proxy: proxyURL, grade: GradeError}
+	// 满血长度按模型配置：gpt-5.5 是 292，5.6/6 系列是 312。
+	targetLength := p.config.TargetLengthFor(model)
 
 	client, err := p.clients.Client(proxyURL)
 	if err != nil {
@@ -153,8 +158,22 @@ func (p *prober) probe(ctx context.Context, cred Credential, model, proxyURL str
 		return out
 	}
 	if stream.hasText || (stream.completed && !stream.completedFailed) {
-		// 满血判定：有产出，且长度等于目标值。312 等 premium 池已验收确认降智。
-		if p.config.TargetStateLength == 0 || out.length == p.config.TargetStateLength {
+		// 先看上游到底用哪个模型服务的。降级时（例如账号的 gpt-6-astra 权限被收走，
+		// 上游改用 gpt-5.6-luna 顶上）铸出来的 state 长度和满血票一模一样，只靠长度
+		// 分不出来；把它当成满血票收进 astra 池再注回真实请求，只会把降智钉死。
+		if served := stream.servedModel; served != "" && served != model {
+			out.grade = GradeDowngraded
+			if pluginconfig.ValidModelName(served) {
+				out.detail = detailOf(fmt.Sprintf(
+					"上游用 %s 服务 %s，这张票不属于该模型，不入池", served, model))
+			} else {
+				// served 是上游给的外部输入，detail 会经看板回到浏览器，认不出来就不回显原文。
+				out.detail = "上游返回的模型名与请求的不一致，这张票不属于该模型，不入池"
+			}
+			return out
+		}
+		// 满血判定：有产出、模型对得上，且长度等于该模型的满血长度。
+		if targetLength == 0 || out.length == targetLength {
 			out.grade = GradeHealthy
 		} else {
 			out.grade = GradeMismatch
@@ -204,12 +223,17 @@ type sseResult struct {
 	completedFailed bool
 	overloaded      bool
 	errorMessage    string
+	// servedModel 是上游在 response 对象里自报的模型名，空表示这一流里没出现过。
+	// 它与请求的模型不一致就说明上游做了模型降级（见 GradeDowngraded）。
+	servedModel string
 }
 
 // readSSE 读 SSE 流，分级一确认就立刻返回以省 token：
 //   - 收到 overloaded error → 立即停；
 //   - 收到首个 output delta → 节点确认可用，立即停；
 //   - 收到 response.completed / response.failed → 立即停。
+//
+// response.created 一定早于首个 delta，所以「收到 delta 就返回」不会漏掉 servedModel。
 //
 // 整体超时由调用方的 context 控制，这里只兜住字节数上限。
 func readSSE(body io.Reader) sseResult {
@@ -237,7 +261,14 @@ func readSSE(body io.Reader) sseResult {
 			continue
 		}
 		switch event {
+		case "response.created":
+			if served := responseModel(payload["response"]); served != "" {
+				out.servedModel = served
+			}
 		case "response.completed":
+			if served := responseModel(payload["response"]); served != "" {
+				out.servedModel = served
+			}
 			out.completed = true
 			out.completedFailed = responseHasError(payload["response"])
 			return out
@@ -259,6 +290,20 @@ func readSSE(body io.Reader) sseResult {
 		}
 	}
 	return out
+}
+
+// responseModel 取 response 对象里的 model 字段，取不到返回空串。
+func responseModel(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var response struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(response.Model)
 }
 
 // responseHasError 判断 response.completed/failed 里的 response 对象是否带 error。

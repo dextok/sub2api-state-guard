@@ -22,6 +22,13 @@
     follow_observed_models: true,
     pool_size: 5,
     target_state_length: 292,
+    // 满血长度按模型不同：5.5 是 292（上面那个兜底值），5.6 / 6 系列是 312。
+    model_state_lengths: {
+      "gpt-5.6-sol": 312,
+      "gpt-5.6-terra": 312,
+      "gpt-5.6-luna": 312,
+      "gpt-6-astra": 312,
+    },
     ticket_ttl_seconds: 2700,
     ticket_stagger_seconds: 600,
     refill_threshold_seconds: 600,
@@ -71,6 +78,7 @@
 
   var MAX_ACCOUNTS = 500;
   var MAX_POOL_MODELS = 16;
+  var MAX_MODEL_STATE_LENGTHS = 32;
   var MAX_PROXY_ITEMS = 200;
   var MAX_URL_BYTES = 2048;
   var MAX_NOTE_BYTES = 120;
@@ -108,6 +116,7 @@
     healthy: "满血",
     weak: "弱",
     mismatch: "长度不符",
+    downgraded: "降级",
     partial: "半截",
     overloaded: "过载",
     blocked: "被拦",
@@ -141,6 +150,9 @@
   // 免得等下一次轮询——运行时数据在保存生效前本来也不会变。
   var lastPayload = null;
   var modelsRerenderTimer = 0;
+  // 「按模型的满血长度」textarea 里解析不了的行。收集时留在这儿，校验时报错，
+  // 不静默丢弃——打错一个字就无声少一条配置是最难查的那种问题。
+  var modelLengthBadLines = [];
 
   // 通道降级提示：宿主 < 0.2.7 不认识 plugin.status（表现为超时），只能退回手动 config.test，
   // 且不该自动轮询——宿主对 config.test 做二次验证门控，轮询会反复触发它。
@@ -397,15 +409,72 @@
     return out;
   }
 
+  // normalizeModelLengths 把「按模型的满血长度」收敛成一个干净的 {模型: 长度} 对象。
+  // 与 Go 侧 Ticket.normalize 一致：键去空格、丢空键、负值归 0。
+  function normalizeModelLengths(raw) {
+    var source = isPlainObject(raw) ? raw : {};
+    var out = {};
+    Object.keys(source).forEach(function (key) {
+      var model = String(key).trim();
+      if (model === "") return;
+      var length = Math.trunc(Number(source[key]));
+      if (!isFinite(length) || length < 0) length = 0;
+      out[model] = length;
+    });
+    return out;
+  }
+
+  // modelLengthsToText / textToModelLengths 在对象与「一行一个 模型名=长度」之间互转。
+  // 键排序后输出，这样光是打开页面不会让草稿看起来"改过"。
+  function modelLengthsToText(lengths) {
+    return Object.keys(lengths)
+      .sort()
+      .map(function (model) {
+        return model + "=" + lengths[model];
+      })
+      .join("\n");
+  }
+
+  // 解析失败的行（没有 = 、长度不是数字）原样留在 invalid 里交给校验报错，
+  // 不静默丢弃——否则管理员打错一个字，那条配置就无声消失了。
+  function textToModelLengths(text) {
+    var out = {};
+    var invalid = [];
+    String(text)
+      .split(/\r?\n/)
+      .forEach(function (line) {
+        var trimmed = line.trim();
+        if (trimmed === "") return;
+        var at = trimmed.lastIndexOf("=");
+        if (at < 0) {
+          invalid.push(trimmed);
+          return;
+        }
+        var model = trimmed.slice(0, at).trim();
+        var raw = trimmed.slice(at + 1).trim();
+        if (model === "" || !/^\d+$/.test(raw)) {
+          invalid.push(trimmed);
+          return;
+        }
+        out[model] = parseInt(raw, 10);
+      });
+    return { lengths: out, invalid: invalid };
+  }
+
   function normalizeTicket(raw) {
     var source = isPlainObject(raw) ? raw : {};
     var models = source.models === undefined ? TICKET_DEFAULTS.models : source.models;
+    var lengths =
+      source.model_state_lengths === undefined
+        ? TICKET_DEFAULTS.model_state_lengths
+        : source.model_state_lengths;
     var effort = pickString(source.probe_effort, TICKET_DEFAULTS.probe_effort).trim().toLowerCase();
     return {
       models: normalizeModels(models),
       follow_observed_models: pickBool(source.follow_observed_models, TICKET_DEFAULTS.follow_observed_models),
       pool_size: pickInt(source.pool_size, TICKET_DEFAULTS.pool_size),
       target_state_length: pickInt(source.target_state_length, TICKET_DEFAULTS.target_state_length),
+      model_state_lengths: normalizeModelLengths(lengths),
       ticket_ttl_seconds: pickInt(source.ticket_ttl_seconds, TICKET_DEFAULTS.ticket_ttl_seconds),
       ticket_stagger_seconds: pickInt(source.ticket_stagger_seconds, TICKET_DEFAULTS.ticket_stagger_seconds),
       refill_threshold_seconds: pickInt(source.refill_threshold_seconds, TICKET_DEFAULTS.refill_threshold_seconds),
@@ -561,6 +630,9 @@
 
     var ticket = guard.ticket_pool;
     ticket.models = normalizeModels(el("tp-models").value.split(/\r?\n/));
+    var parsed = textToModelLengths(el("tp-model-lengths").value);
+    ticket.model_state_lengths = parsed.lengths;
+    modelLengthBadLines = parsed.invalid;
     readSection(TICKET_NUMBERS, ticket, TICKET_DEFAULTS, "number");
     readSection(TICKET_TEXTS, ticket, TICKET_DEFAULTS, "text");
     readSection(TICKET_FLAGS, ticket, TICKET_DEFAULTS, "flag");
@@ -581,6 +653,8 @@
     el("guard-enabled").checked = guard.enabled;
 
     el("tp-models").value = guard.ticket_pool.models.join("\n");
+    el("tp-model-lengths").value = modelLengthsToText(guard.ticket_pool.model_state_lengths);
+    modelLengthBadLines = [];
     writeSection(TICKET_NUMBERS, guard.ticket_pool, "number");
     writeSection(TICKET_TEXTS, guard.ticket_pool, "text");
     writeSection(TICKET_FLAGS, guard.ticket_pool, "flag");
@@ -797,6 +871,30 @@
     }
   }
 
+  // validateModelLengths 与 Go 侧 validateModelStateLengths 同规则：条数上限、
+  // key 走模型名那套字符集与字节数、value 为 0（不按长度判定）或 1-4096。
+  function validateModelLengths(lengths, errors) {
+    modelLengthBadLines.forEach(function (line) {
+      errors.push("按模型的满血长度：无法解析「" + line + "」，格式是 模型名=长度");
+    });
+    var models = Object.keys(lengths).sort();
+    if (models.length > MAX_MODEL_STATE_LENGTHS) {
+      errors.push(
+        "按模型的满血长度最多 " + MAX_MODEL_STATE_LENGTHS + " 条，当前 " + models.length + " 条"
+      );
+    }
+    models.forEach(function (model) {
+      if (byteLength(model) > MAX_MODEL_NAME_BYTES) {
+        errors.push("模型名「" + model + "」超过 " + MAX_MODEL_NAME_BYTES + " 字节");
+      } else if (!MODEL_NAME_CHARS.test(model)) {
+        errors.push("模型名「" + model + "」含非法字符，只能包含字母、数字与 - _ . : /");
+      }
+      if (lengths[model] !== 0) {
+        checkRange(model + " 的满血长度", lengths[model], 1, 4096, errors);
+      }
+    });
+  }
+
   function validateTicket(ticket, errors) {
     if (ticket.models.length > MAX_POOL_MODELS) {
       errors.push("模型最多 " + MAX_POOL_MODELS + " 个，当前 " + ticket.models.length + " 个");
@@ -813,8 +911,9 @@
     }
     checkRange("每个池的票数", ticket.pool_size, 1, 20, errors);
     if (ticket.target_state_length !== 0) {
-      checkRange("满血票长度", ticket.target_state_length, 1, 4096, errors);
+      checkRange("默认满血票长度", ticket.target_state_length, 1, 4096, errors);
     }
+    validateModelLengths(ticket.model_state_lengths, errors);
     checkRange("票有效期", ticket.ticket_ttl_seconds, 300, 86400, errors);
     checkRange("同批错峰", ticket.ticket_stagger_seconds, 0, 3600, errors);
     checkRange("补池阈值", ticket.refill_threshold_seconds, 30, ticket.ticket_ttl_seconds, errors);
@@ -1173,10 +1272,12 @@
       pill(container, "代理库", "已关闭", "pill-off");
     }
     pill(container, "注入头", guard.header_name || "—", "");
-    pill(container, "满血长度", guard.target_state_length ? String(guard.target_state_length) : "不限", "");
+    var lengthText = guard.target_state_length ? String(guard.target_state_length) : "不限";
+    if (guard.model_length_overrides > 0) lengthText += "（" + guard.model_length_overrides + " 个模型单独配置）";
+    pill(container, "默认满血长度", lengthText, "");
   }
 
-  function renderModelCard(model, poolSize) {
+  function renderModelCard(model, poolSize, defaultLength) {
     var card = node("div", "model-card" + (model.pending ? " model-card-pending" : ""));
     var head = node("div", "model-card-head");
     head.appendChild(node("span", "model-name", model.model));
@@ -1214,6 +1315,12 @@
     else round.push("还没跑过");
     if (model.last_added > 0) round.push("新增 " + model.last_added + " 张");
     card.appendChild(node("div", "model-meta", round.join(" · ")));
+
+    // 只在这个池的口径与默认值不同时标出来，免得每张卡都重复一遍总览已经写过的数字。
+    var length = model.target_state_length || 0;
+    if (length !== (defaultLength || 0)) {
+      card.appendChild(node("div", "model-meta", "满血长度 " + (length ? String(length) : "不限")));
+    }
 
     if (model.grades && Object.keys(model.grades).length > 0) {
       var grades = Object.keys(model.grades)
@@ -1253,7 +1360,7 @@
     return ordered;
   }
 
-  function renderAccountStatus(account, poolSize, draftModels) {
+  function renderAccountStatus(account, poolSize, draftModels, defaultLength) {
     var box = node("div", "status-account");
     var head = node("div", "status-account-head");
     head.appendChild(node("span", "status-name", "账号 " + account.account_id));
@@ -1272,7 +1379,7 @@
     }
     var grid = node("div", "model-grid");
     models.forEach(function (model) {
-      grid.appendChild(renderModelCard(model, poolSize));
+      grid.appendChild(renderModelCard(model, poolSize, defaultLength));
     });
     box.appendChild(grid);
     return box;
@@ -1327,8 +1434,10 @@
       || (draft && draft.overload_guard.ticket_pool.pool_size)
       || 0;
     var draftModels = draft ? draft.overload_guard.ticket_pool.models : [];
+    // defaultLength 是总览药丸上那个默认口径，卡片只在自己的口径与它不同时才额外标出来。
+    var defaultLength = (payload && payload.guard && payload.guard.target_state_length) || 0;
     accounts.forEach(function (account) {
-      box.appendChild(renderAccountStatus(account, poolSize, draftModels));
+      box.appendChild(renderAccountStatus(account, poolSize, draftModels, defaultLength));
     });
     el("status-empty").hidden = accounts.length > 0;
     el("status-empty").textContent = payload && payload.guard && !payload.guard.enabled
@@ -1589,7 +1698,7 @@
   /* ---------- 初始化 ---------- */
 
   function bindFormEvents() {
-    var ids = ["tp-models", "tp-effort", "guard-enabled"];
+    var ids = ["tp-models", "tp-model-lengths", "tp-effort", "guard-enabled"];
     TICKET_NUMBERS.concat(TICKET_TEXTS, TICKET_FLAGS, PROXY_FLAGS).forEach(function (pair) {
       ids.push(pair[0]);
     });

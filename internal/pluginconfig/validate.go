@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -102,6 +103,22 @@ func (t *Ticket) normalize() {
 	if t.TargetStateLength < 0 {
 		t.TargetStateLength = 0
 	}
+
+	// 覆盖表同样去空格、丢空键、负值归 0。必须幂等：ValidateConfig 会把规范化结果
+	// 回存给宿主，TestConfig 又靠「两次 Marshal 是否一致」判断配置有没有生效
+	//（map 的 JSON 输出由 encoding/json 按键排序，顺序是稳定的）。
+	lengths := make(map[string]int, len(t.ModelStateLengths))
+	for model, length := range t.ModelStateLengths {
+		trimmed := strings.TrimSpace(model)
+		if trimmed == "" {
+			continue
+		}
+		if length < 0 {
+			length = 0
+		}
+		lengths[trimmed] = length
+	}
+	t.ModelStateLengths = lengths
 }
 
 // normalize 规范化代理条目。必须幂等：ValidateConfig 会把规范化结果回存给宿主，
@@ -302,6 +319,9 @@ func (t Ticket) validate(field string) error {
 			return err
 		}
 	}
+	if err := validateModelStateLengths(field, t.ModelStateLengths); err != nil {
+		return err
+	}
 	if err := checkRange(field+".ticket_ttl_seconds", t.TicketTTLSeconds, MinTicketTTLSeconds, 86400); err != nil {
 		return err
 	}
@@ -470,6 +490,34 @@ func checkURLShape(field, rawURL string) error {
 }
 
 // validateModelName 限制模型名的字符集：它会被写进探针请求体，也会成为票池的键。
+// validateModelStateLengths 校验「按模型覆盖满血长度」表。键按字典序遍历，
+// 保证同一份非法配置每次都报同一条错误。
+func validateModelStateLengths(field string, lengths map[string]int) error {
+	if len(lengths) > MaxModelStateLengths {
+		return fmt.Errorf("%s.model_state_lengths 最多 %d 条，当前 %d 条",
+			field, MaxModelStateLengths, len(lengths))
+	}
+	models := make([]string, 0, len(lengths))
+	for model := range lengths {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	for _, model := range models {
+		if err := validateModelName(fmt.Sprintf("%s.model_state_lengths 的键 %q", field, model), model); err != nil {
+			return err
+		}
+		if lengths[model] == 0 {
+			// 0 表示这个模型不按长度判定，是合法取值。
+			continue
+		}
+		if err := checkRange(fmt.Sprintf("%s.model_state_lengths[%s]", field, model),
+			lengths[model], 1, 4096); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validateModelName(field, model string) error {
 	if model == "" {
 		return fmt.Errorf("%s 不能为空", field)

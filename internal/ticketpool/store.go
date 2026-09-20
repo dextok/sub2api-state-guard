@@ -82,13 +82,16 @@ func (s *Store) Pick(accountID int64, model string, targetLength int, now time.T
 }
 
 // Ready 表示账号至少有一张仍在有效期内、长度也相符的票（不保证是某个具体模型的）。
-func (s *Store) Ready(accountID int64, targetLength int, now time.Time) bool {
+//
+// 满血长度按模型配置，所以这里不能用一个数字扫全部池：每个池都要拿自己模型的口径来判。
+func (s *Store) Ready(accountID int64, targetFor func(model string) int, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, pool := range s.pools {
 		if key.account != accountID {
 			continue
 		}
+		targetLength := targetFor(key.model)
 		for index := range pool.tickets {
 			if usable(&pool.tickets[index], now, targetLength) {
 				return true
@@ -305,7 +308,7 @@ func (s *Store) ensureLocked(key poolKey) *poolState {
 
 // purgeLocked 清理过期票与长度不符的票。
 //
-// 长度判定要在这里再做一次：管理员改了 target_state_length 之后，
+// 长度判定要在这里再做一次：管理员改了该模型的满血长度之后，
 // 旧口径下收进来的票就不该继续被注入。
 func purgeLocked(pool *poolState, now time.Time, targetLength int) {
 	kept := pool.tickets[:0]

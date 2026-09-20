@@ -13,6 +13,9 @@ type ModelStatus struct {
 	Model string `json:"model"`
 	Valid int    `json:"valid"`
 	Size  int    `json:"size"`
+	// TargetLength 是这个模型的满血票长度口径；0 表示不按长度判定。
+	// 按模型可配，所以每张卡片都要带自己的值，不能只在总览里放一个数字。
+	TargetLength int `json:"target_state_length"`
 	// FreshestSeconds 是最"新"一张票的剩余有效期（秒）；0 表示池空。
 	FreshestSeconds int `json:"freshest_seconds"`
 	// SoonestSeconds 是最快过期那张票的剩余有效期（秒）。

@@ -58,9 +58,10 @@
         <section class="card">
           <h2>票池</h2>
           <p class="card-note">
-            插件自己向网关发探针请求「撞票」：只有 <code>x-codex-turn-state</code>
-            长度<strong>恰好等于</strong>下面那个「满血票长度」的才会入池，其余（例如降智池的 312）一律丢弃。
-            数字框留空表示恢复默认值。
+            插件自己向网关发探针请求「撞票」：只有上游确实用请求的模型服务、且
+            <code>x-codex-turn-state</code> 长度<strong>恰好等于该模型的满血长度</strong>的票才会入池。
+            满血长度按模型不同（gpt-5.5 是 292，5.6 / 6 系列是 312），所以下面既有一个默认值，
+            也可以按模型单独配。数字框留空表示恢复默认值。
           </p>
           <div class="grid">
             <label class="field field-wide">
@@ -69,6 +70,14 @@
               <em class="hint">
                 每个「账号 × 模型」维护一个独立票池——state 按模型铸造，跨模型复用会被上游识破。
                 最多 16 个模型
+              </em>
+            </label>
+            <label class="field field-wide">
+              <span class="label">按模型的满血长度（每行一个 <code>模型名=长度</code>）</span>
+              <textarea id="tp-model-lengths" rows="4" spellcheck="false" autocomplete="off"></textarea>
+              <em class="hint">
+                没列到的模型用下面那个默认值。实测 gpt-5.5=292，gpt-5.6-sol / terra / luna 与
+                gpt-6-astra 都是 312。长度填 0 表示这个模型不按长度判定，最多 32 条
               </em>
             </label>
             <label class="field field-wide checkbox-field">
@@ -84,9 +93,9 @@
               <em class="hint">1-20，默认 5</em>
             </label>
             <label class="field">
-              <span class="label">满血票长度</span>
+              <span class="label">默认满血票长度</span>
               <input type="number" id="tp-target-length" min="0" max="4096" step="1" inputmode="numeric" />
-              <em class="hint">默认 292；填 0 表示不按长度判定（任何撞出产出的票都入池）</em>
+              <em class="hint">上面没单独配的模型用它。默认 292；填 0 表示不按长度判定（任何撞出产出的票都入池）</em>
             </label>
             <label class="field">
               <span class="label">票有效期（秒）</span>

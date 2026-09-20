@@ -35,9 +35,11 @@ func testIdentity() Identity {
 type gatewayStub struct {
 	server *httptest.Server
 	calls  atomic.Int64
-	// length 是要回的 state 长度；等于 target_state_length 才算满血票。
+	// length 是要回的 state 长度；等于该模型的满血长度才算满血票。
 	length atomic.Int64
 	status atomic.Int64
+	// served 非空时，SSE 里自报这个模型名，用来模拟上游换模型服务（降级）。
+	served atomic.Value
 }
 
 func newGatewayStub(t *testing.T) *gatewayStub {
@@ -45,6 +47,7 @@ func newGatewayStub(t *testing.T) *gatewayStub {
 	stub := &gatewayStub{}
 	stub.length.Store(int64(pluginconfig.DefaultTargetStateLength))
 	stub.status.Store(http.StatusOK)
+	stub.served.Store("")
 	stub.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		serial := stub.calls.Add(1)
 		_, _ = io.Copy(io.Discard, request.Body)
@@ -53,6 +56,11 @@ func newGatewayStub(t *testing.T) *gatewayStub {
 		}
 		writer.Header().Set("Content-Type", "text/event-stream")
 		writer.WriteHeader(int(stub.status.Load()))
+		if served, _ := stub.served.Load().(string); served != "" {
+			raw, _ := json.Marshal(served)
+			_, _ = fmt.Fprintf(writer,
+				"event: response.created\ndata: {\"response\":{\"id\":\"r1\",\"model\":%s}}\n\n", raw)
+		}
 		_, _ = io.WriteString(writer, "event: response.output_text.delta\ndata: {\"delta\":\"ok\"}\n\n")
 	}))
 	t.Cleanup(stub.server.Close)
@@ -419,7 +427,10 @@ func TestTestConfigReportsLiveTicketStatus(t *testing.T) {
 		t.Fatalf("看板票数 = %d/%d", board.Tickets.Valid, board.Tickets.Wanted)
 	}
 	if board.Guard.TargetLength != pluginconfig.DefaultTargetStateLength {
-		t.Fatalf("看板满血长度 = %d", board.Guard.TargetLength)
+		t.Fatalf("看板默认满血长度 = %d", board.Guard.TargetLength)
+	}
+	if board.Guard.ModelLengthOverrides != len(pluginconfig.DefaultPoolModels()) {
+		t.Fatalf("看板单独配置长度的模型数 = %d", board.Guard.ModelLengthOverrides)
 	}
 	if len(board.Tickets.Accounts) != 1 {
 		t.Fatalf("看板账号数 = %d", len(board.Tickets.Accounts))
@@ -430,6 +441,10 @@ func TestTestConfigReportsLiveTicketStatus(t *testing.T) {
 	}
 	if len(account.Models) != 1 || account.Models[0].Model != testModel || account.Models[0].Valid != 1 {
 		t.Fatalf("看板模型明细 = %+v", account.Models)
+	}
+	// 每张卡片带自己的长度口径：gpt-5-codex 不在默认覆盖表里，落到兜底值。
+	if account.Models[0].TargetLength != pluginconfig.DefaultTargetStateLength {
+		t.Fatalf("看板卡片口径 = %d", account.Models[0].TargetLength)
 	}
 	if account.Models[0].FreshestSeconds <= 0 {
 		t.Fatalf("看板应当报出剩余有效期: %+v", account.Models[0])
@@ -584,8 +599,8 @@ func TestTestConfigFlagsUnappliedConfig(t *testing.T) {
 	}
 }
 
-// 撞到的 state 长度不等于 target_state_length（例如 312 的 premium 池）时，
-// 池会一直是空的。这不是「还在预热」，必须报成失败并给出可操作的排查方向。
+// 撞到的 state 长度不等于该模型的满血长度时，池会一直是空的。
+// 这不是「还在预热」，必须报成失败并给出可操作的排查方向。
 func TestTestConfigReportsNoHealthyTicket(t *testing.T) {
 	server, gateway := newGuardedServer(t)
 	gateway.length.Store(312)
@@ -619,6 +634,40 @@ func TestTestConfigReportsNoHealthyTicket(t *testing.T) {
 	}
 	if models[0].Detail == "" || !strings.Contains(models[0].Detail, "mismatch") {
 		t.Fatalf("看板应当带上各出口的分级摘要: %q", models[0].Detail)
+	}
+}
+
+// 账号在上游被降级时，撞回来的 state 长度可能正好对得上，只有上游自报的模型名能拆穿。
+// 这种情况下「调长度」是错的建议：排错文案必须指向账号的模型权限，而不是长度口径。
+func TestTestConfigReportsUpstreamDowngrade(t *testing.T) {
+	server, gateway := newGuardedServer(t)
+	gateway.served.Store("gpt-5.6-luna")
+	harvest(server, gateway)
+	if added := server.state().tickets.Refill(context.Background(), testAccountID, testModel); added != 0 {
+		t.Fatalf("上游换了模型服务，这些票不属于本模型，却入了 %d 张", added)
+	}
+
+	result, err := server.TestConfig(context.Background(),
+		&pluginv1.TestConfigRequest{ConfigJson: guardJSON(gateway.base())})
+	if err != nil {
+		t.Fatalf("TestConfig 出错: %v", err)
+	}
+	if result.GetSuccess() {
+		t.Fatalf("撞了一轮全是降级票时应当失败: %s", result.GetMessage())
+	}
+	human, board := splitDashboard(t, result.GetMessage())
+	if strings.Contains(human, "调整为上游当前实际返回的长度") {
+		t.Fatalf("全是降级票时不该建议调长度: %q", human)
+	}
+	if !strings.Contains(human, "用别的模型服务") {
+		t.Fatalf("应当指出上游换了模型服务: %q", human)
+	}
+	models := board.Tickets.Accounts[0].Models
+	if len(models) != 1 || models[0].Grades["downgraded"] != 1+pluginconfig.DefaultRetryRounds {
+		t.Fatalf("看板应当把这几轮都记成 downgraded: %+v", models)
+	}
+	if !strings.Contains(models[0].Detail, "gpt-5.6-luna") {
+		t.Fatalf("看板应当点明是谁替它服务的: %q", models[0].Detail)
 	}
 }
 

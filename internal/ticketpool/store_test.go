@@ -18,6 +18,12 @@ func healthyRecord(state string) record {
 	return record{state: padded, length: targetLength, grade: GradeHealthy}
 }
 
+// healthyRecordState 铸一张指定长度的满血票，用来验证不同模型各认各的口径。
+func healthyRecordState(state string, length int) record {
+	padded := state + repeatTo(length-len(state))
+	return record{state: padded, length: length, grade: GradeHealthy}
+}
+
 func repeatTo(count int) string {
 	out := make([]byte, count)
 	for index := range out {
@@ -35,6 +41,13 @@ func storeParams(size int) StoreParams {
 		Size:           size,
 		TargetLength:   targetLength,
 	}
+}
+
+// storeParamsLen 与 storeParams 相同，只是换一个满血长度口径。
+func storeParamsLen(size, length int) StoreParams {
+	params := storeParams(size)
+	params.TargetLength = length
+	return params
 }
 
 // 决策表来自参考实现，改动它等于改动整个补池节奏，所以逐行钉住。
@@ -291,18 +304,45 @@ func TestPickIsolatesModelsAndAccounts(t *testing.T) {
 func TestReadyIgnoresModelButRespectsExpiry(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	store := NewStore()
-	if store.Ready(1, 0, now) {
+	anyLength := func(string) int { return 0 }
+	if store.Ready(1, anyLength, now) {
 		t.Fatal("空池不该 Ready")
 	}
 	store.StoreRound(1, "gpt-5-codex", []record{healthyRecord("a")}, storeParams(3), now)
-	if !store.Ready(1, 0, now) {
+	if !store.Ready(1, anyLength, now) {
 		t.Fatal("有票就该 Ready")
 	}
-	if store.Ready(2, 0, now) {
+	if store.Ready(2, anyLength, now) {
 		t.Fatal("别的账号不该 Ready")
 	}
-	if store.Ready(1, 0, now.Add(2701*time.Second)) {
+	if store.Ready(1, anyLength, now.Add(2701*time.Second)) {
 		t.Fatal("票过期后不该 Ready")
+	}
+}
+
+// Ready 的口径是按模型取的：同一账号下两个模型各认各的满血长度，
+// 只有长度对得上的那个池才让账号 Ready。
+func TestReadyResolvesTargetLengthPerModel(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	store := NewStore()
+	store.StoreRound(1, "gpt-5.5", []record{healthyRecordState("a", 292)}, storeParamsLen(3, 292), now)
+	store.StoreRound(1, "gpt-6-astra", []record{healthyRecordState("b", 312)}, storeParamsLen(3, 312), now)
+
+	lengths := map[string]int{"gpt-5.5": 292, "gpt-6-astra": 312}
+	targetFor := func(model string) int { return lengths[model] }
+	if !store.Ready(1, targetFor, now) {
+		t.Fatal("两个池的长度都对得上，账号应当 Ready")
+	}
+
+	// 把两个池的口径都换成对方的长度，两边就都不合格了。
+	swapped := map[string]int{"gpt-5.5": 312, "gpt-6-astra": 292}
+	if store.Ready(1, func(model string) int { return swapped[model] }, now) {
+		t.Fatal("口径互换后没有任何一个池的票合格，不该 Ready")
+	}
+	// 只有 astra 的口径错，5.5 那个池仍然让账号 Ready——Ready 是账号级的或。
+	half := map[string]int{"gpt-5.5": 292, "gpt-6-astra": 292}
+	if !store.Ready(1, func(model string) int { return half[model] }, now) {
+		t.Fatal("还有一个池合格时账号应当 Ready")
 	}
 }
 

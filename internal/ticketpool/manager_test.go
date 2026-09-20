@@ -181,6 +181,43 @@ func TestRefillFillsPoolAndServesValue(t *testing.T) {
 	}
 }
 
+// 满血长度按模型不同，所以同一个账号下两个池各按各的口径收票：
+// 上游回 312 时，口径 312 的池收得到，落到兜底 292 的池一张也收不到。
+func TestRefillUsesPerModelTargetLength(t *testing.T) {
+	harness := newManagerHarness(t, func(ticket *pluginconfig.Ticket) {
+		ticket.Models = []string{"gpt-5-codex", "gpt-6-astra"}
+		ticket.TargetStateLength = 292
+		ticket.ModelStateLengths = map[string]int{"gpt-6-astra": 312}
+	}, nil)
+	harness.harvest(managedAccount)
+	harness.stub.reply(http.StatusOK, state(312), sseText)
+
+	if added := harness.manager.Refill(context.Background(), managedAccount, "gpt-6-astra"); added != 1 {
+		t.Fatalf("astra 的口径是 312，应当补入 1 张，实际 %d 张", added)
+	}
+	if added := harness.manager.Refill(context.Background(), managedAccount, "gpt-5-codex"); added != 0 {
+		t.Fatalf("gpt-5-codex 落到兜底的 292，312 的票不该入池，实际补入 %d 张", added)
+	}
+	if value, ok := harness.manager.Value(managedAccount, "gpt-6-astra"); !ok || len(value) != 312 {
+		t.Fatalf("astra 应当取到一张 312 的票，ok=%v 长度=%d", ok, len(value))
+	}
+	if _, ok := harness.manager.Value(managedAccount, "gpt-5-codex"); ok {
+		t.Fatal("gpt-5-codex 池是空的，不该取到票")
+	}
+
+	// 每张卡片都要带自己的口径，否则看板上「满血」二字没法核对。
+	want := map[string]int{"gpt-5-codex": 292, "gpt-6-astra": 312}
+	models := harness.manager.Status().Accounts[0].Models
+	if len(models) != len(want) {
+		t.Fatalf("卡片数 = %d，期望 %d", len(models), len(want))
+	}
+	for _, model := range models {
+		if model.TargetLength != want[model.Model] {
+			t.Fatalf("%s 卡片的口径 = %d，期望 %d", model.Model, model.TargetLength, want[model.Model])
+		}
+	}
+}
+
 // 撞不到满血票时换未用过的出口重试 retry_rounds 轮，而不是死等下一个周期。
 func TestRefillRetriesWithFreshProxies(t *testing.T) {
 	proxies := newFakeProxies("socks5://1.1.1.1:1080", "socks5://2.2.2.2:1080", "http://3.3.3.3:8080")

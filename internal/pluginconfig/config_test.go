@@ -238,6 +238,100 @@ func TestTicketPoolValidation(t *testing.T) {
 	}
 }
 
+// 满血长度按模型不同（实测 gpt-5.5 是 292，premium 四个是 312），所以覆盖表是主口径、
+// target_state_length 只是兜底。这组用例钉住默认值、优先级、规范化与校验边界。
+func TestModelStateLengths(t *testing.T) {
+	// 不写这个键的老配置要能解析，并且拿到默认的 premium 覆盖表。
+	config, err := Parse([]byte(`{"overload_guard":{"ticket_pool":{"pool_size":3}}}`))
+	if err != nil {
+		t.Fatalf("老配置（无 model_state_lengths）解析出错: %v", err)
+	}
+	pool := config.OverloadGuard.TicketPool
+	if len(pool.ModelStateLengths) != len(DefaultPoolModels()) {
+		t.Fatalf("默认覆盖表 = %v", pool.ModelStateLengths)
+	}
+	for _, model := range DefaultPoolModels() {
+		if pool.ModelStateLengths[model] != DefaultPremiumStateLength {
+			t.Fatalf("默认覆盖表里 %s = %d，期望 %d",
+				model, pool.ModelStateLengths[model], DefaultPremiumStateLength)
+		}
+		if got := pool.TargetLengthFor(model); got != DefaultPremiumStateLength {
+			t.Fatalf("TargetLengthFor(%s) = %d，期望 %d", model, got, DefaultPremiumStateLength)
+		}
+	}
+	// 没列到的模型回落到全局兜底值。
+	if got := pool.TargetLengthFor("gpt-5.5"); got != DefaultTargetStateLength {
+		t.Fatalf("未覆盖的模型应当用兜底值，得到 %d", got)
+	}
+
+	// 显式给了这个键就整表替换；key 去空格、负值归 0、空 key 丢弃。
+	config, err = Parse([]byte(`{"overload_guard":{"ticket_pool":{"model_state_lengths":
+		{" gpt-5.5 ":292,"gpt-6-astra":-3,"  ":999}}}}`))
+	if err != nil {
+		t.Fatalf("Parse 出错: %v", err)
+	}
+	pool = config.OverloadGuard.TicketPool
+	want := map[string]int{"gpt-5.5": 292, "gpt-6-astra": 0}
+	if len(pool.ModelStateLengths) != len(want) {
+		t.Fatalf("规范化后的覆盖表 = %v，期望 %v", pool.ModelStateLengths, want)
+	}
+	for model, length := range want {
+		if pool.ModelStateLengths[model] != length {
+			t.Fatalf("覆盖表 %s = %d，期望 %d", model, pool.ModelStateLengths[model], length)
+		}
+	}
+	// 值为 0 表示这个模型不按长度判定，而不是回落到兜底值。
+	if got := pool.TargetLengthFor("gpt-6-astra"); got != 0 {
+		t.Fatalf("覆盖值 0 应当表示不限长度，得到 %d", got)
+	}
+	// 空表也是合法的，含义是「全都跟随全局值」。
+	config, err = Parse([]byte(`{"overload_guard":{"ticket_pool":{"model_state_lengths":{}}}}`))
+	if err != nil {
+		t.Fatalf("空覆盖表应当合法: %v", err)
+	}
+	if got := config.OverloadGuard.TicketPool.TargetLengthFor("gpt-6-astra"); got != DefaultTargetStateLength {
+		t.Fatalf("空覆盖表下应当回落到兜底值，得到 %d", got)
+	}
+
+	// 规范化必须幂等：TestConfig 靠比对两次 Marshal 判断配置是否生效。
+	first, err := config.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal 出错: %v", err)
+	}
+	again, err := Parse(first)
+	if err != nil {
+		t.Fatalf("回灌出错: %v", err)
+	}
+	second, err := again.Marshal()
+	if err != nil {
+		t.Fatalf("二次 Marshal 出错: %v", err)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("规范化不幂等:\n%s\n%s", first, second)
+	}
+
+	for name, bad := range map[string]string{
+		"key 含空格": `{"overload_guard":{"ticket_pool":{"model_state_lengths":{"gpt 5":292}}}}`,
+		"value 过大": `{"overload_guard":{"ticket_pool":{"model_state_lengths":{"gpt-5.5":4097}}}}`,
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Fatalf("%s: 应当被拒绝", name)
+		}
+	}
+
+	// 条数上限：覆盖表可以包含 models 之外、靠 follow_observed_models 跟踪出来的模型，
+	// 所以上限比 MaxPoolModels 宽，但仍然有上限。
+	pairs := make([]string, 0, MaxModelStateLengths+1)
+	for index := 0; index <= MaxModelStateLengths; index++ {
+		pairs = append(pairs, fmt.Sprintf(`"m-%d":292`, index))
+	}
+	over := fmt.Sprintf(`{"overload_guard":{"ticket_pool":{"model_state_lengths":{%s}}}}`,
+		strings.Join(pairs, ","))
+	if _, err := Parse([]byte(over)); err == nil {
+		t.Fatalf("覆盖表超过 %d 条时应当被拒绝", MaxModelStateLengths)
+	}
+}
+
 func TestProxyPoolValidation(t *testing.T) {
 	for name, raw := range map[string]string{
 		"地址为空":    `{"overload_guard":{"proxy_pool":{"proxies":[{"name":"a","url":"  "}]}}}`,
@@ -679,7 +773,8 @@ func TestMarshalContainsAllFields(t *testing.T) {
 		t.Fatalf("ticket_pool 不是对象: %v", err)
 	}
 	for _, key := range []string{
-		"models", "follow_observed_models", "pool_size", "target_state_length", "ticket_ttl_seconds",
+		"models", "follow_observed_models", "pool_size", "target_state_length",
+		"model_state_lengths", "ticket_ttl_seconds",
 		"ticket_stagger_seconds", "refill_threshold_seconds", "check_interval_seconds",
 		"probe_timeout_seconds", "probe_effort", "proxies_per_round", "retry_rounds",
 		"include_direct", "gateway_base_url", "user_agent",

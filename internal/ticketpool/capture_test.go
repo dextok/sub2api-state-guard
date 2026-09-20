@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dextok/sub2api-state-guard/internal/pluginconfig"
 )
@@ -82,6 +83,25 @@ const (
 
 func state(length int) string { return strings.Repeat("s", length) }
 
+// sseCreatedAs / sseCompletedAs 让假桩自报一个模型名，用来模拟上游换模型服务。
+func sseCreatedAs(model string) string {
+	return "event: response.created\ndata: {\"response\":{\"id\":\"r1\",\"model\":" +
+		jsonString(model) + "}}\n\n"
+}
+
+func sseCompletedAs(model string) string {
+	return "event: response.completed\ndata: {\"response\":{\"id\":\"r1\",\"model\":" +
+		jsonString(model) + "}}\n\n"
+}
+
+func jsonString(value string) string {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}
+
 func newProber(t *testing.T, stub *captureStub, tune func(*pluginconfig.Ticket)) *prober {
 	t.Helper()
 	config := pluginconfig.DefaultTicketPool()
@@ -106,7 +126,8 @@ func testCredential() Credential {
 	return Credential{Authorization: "Bearer " + strings.Repeat("a", 40), AccountHeader: "acct-9"}
 }
 
-// 分级表决定了哪张票入池。只有 healthy 会入池，312（premium 池）已验收确认降智。
+// 分级表决定了哪张票入池，只有 healthy 会入池。长度口径按模型取：这里探的是
+// gpt-5-codex，覆盖表里没有它，落到全局兜底的 292。
 func TestProbeGrading(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -154,6 +175,78 @@ func TestProbeWithoutLengthJudgement(t *testing.T) {
 	})
 	if got.grade != GradeHealthy {
 		t.Fatalf("分级 = %s，期望 healthy", got.grade)
+	}
+}
+
+// 长度口径按模型取：同一个探针对两个模型用各自的标准判定。
+func TestProbeUsesPerModelTargetLength(t *testing.T) {
+	stub := newCaptureStub(t)
+	stub.reply(http.StatusOK, state(312), sseText)
+	prober := newProber(t, stub, func(config *pluginconfig.Ticket) {
+		config.TargetStateLength = 292
+		config.ModelStateLengths = map[string]int{"gpt-6-astra": 312}
+	})
+
+	if got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", ""); got.grade != GradeHealthy {
+		t.Fatalf("astra 的口径是 312，312 的票应当是 healthy，得到 %s", got.grade)
+	}
+	if got := prober.probe(context.Background(), testCredential(), "gpt-5.5", ""); got.grade != GradeMismatch {
+		t.Fatalf("5.5 落到兜底的 292，312 的票应当是 mismatch，得到 %s", got.grade)
+	}
+}
+
+// 账号被降级时上游用别的模型服务，铸出来的 state 长度可能正好等于目标值。
+// 光看长度分不出来，必须看上游自报的模型名，否则这张票会被当成满血票注给下一个请求。
+func TestProbeDetectsServedModelDowngrade(t *testing.T) {
+	stub := newCaptureStub(t)
+	stub.reply(http.StatusOK, state(312), sseCreatedAs("gpt-5.6-luna")+sseText)
+	prober := newProber(t, stub, func(config *pluginconfig.Ticket) {
+		config.ModelStateLengths = map[string]int{"gpt-6-astra": 312}
+	})
+
+	got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", "")
+	if got.grade != GradeDowngraded {
+		t.Fatalf("分级 = %s，期望 downgraded（detail=%q）", got.grade, got.detail)
+	}
+	if !strings.Contains(got.detail, "gpt-5.6-luna") || !strings.Contains(got.detail, "gpt-6-astra") {
+		t.Fatalf("detail 应当点明是谁替谁服务的，得到 %q", got.detail)
+	}
+	// 只有 healthy 入池，降级票必须被挡在池外。
+	store := NewStore()
+	if added := store.StoreRound(1, "gpt-6-astra", []record{got}, storeParamsLen(3, 312), time.Unix(1700000000, 0)); added != 0 {
+		t.Fatalf("降级票入池了 %d 张", added)
+	}
+
+	// response.completed 里的模型名同样算数（有些响应不带 created 事件）。
+	stub.reply(http.StatusOK, state(312), sseCompletedAs("gpt-5.6-luna"))
+	if got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", ""); got.grade != GradeDowngraded {
+		t.Fatalf("completed 里的模型名也要认，得到 %s", got.grade)
+	}
+
+	// 上游自报的名字与请求一致时照旧走长度判定。
+	stub.reply(http.StatusOK, state(312), sseCreatedAs("gpt-6-astra")+sseText)
+	if got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", ""); got.grade != GradeHealthy {
+		t.Fatalf("同名时应当回到长度判定，得到 %s（detail=%q）", got.grade, got.detail)
+	}
+	// 上游没给模型名时也一样——老网关不带这个字段，不能因此判成降级。
+	stub.reply(http.StatusOK, state(312), sseText)
+	if got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", ""); got.grade != GradeHealthy {
+		t.Fatalf("没有模型名时应当回到长度判定，得到 %s", got.grade)
+	}
+}
+
+// detail 会经看板回到浏览器，上游返回的模型名是外部输入：认不出来就不回显原文。
+func TestProbeDoesNotEchoUnsafeServedModel(t *testing.T) {
+	stub := newCaptureStub(t)
+	evil := "<img src=x onerror=alert(1)>"
+	stub.reply(http.StatusOK, state(292), sseCreatedAs(evil)+sseText)
+
+	got := probeOnce(t, stub, testCredential(), nil)
+	if got.grade != GradeDowngraded {
+		t.Fatalf("分级 = %s，期望 downgraded", got.grade)
+	}
+	if strings.Contains(got.detail, "<img") || strings.Contains(got.detail, evil) {
+		t.Fatalf("非法模型名被原样回显到 detail: %q", got.detail)
 	}
 }
 

@@ -945,6 +945,9 @@
     el(id).hidden = false;
     // 弹窗是 fixed 定位，撑不开文档高度，先向宿主申请最大可用高度。
     bridge.resize(960);
+    // 同时锁住背后的页面：iframe 这时比表单矮，不锁的话文档会自己长出一根滚动条，
+    // 和弹窗内部那根叠成两根（见 styles.css 的 .modal-open）。
+    syncModalLock();
   }
 
   function closeModal(id) {
@@ -953,8 +956,17 @@
     proxyIndex = -1;
     pendingRemoveModel = "";
     ticketModalModel = "";
+    syncModalLock();
     lastHeight = 0;
     reportHeight();
+  }
+
+  // syncModalLock 把「有没有弹窗开着」同步到 <html> 的 class 上。
+  // 逐个弹窗各自加减 class 会在「关一个、另一个还开着」时提前解锁，所以统一按总状态算。
+  function syncModalLock() {
+    var root = document.documentElement;
+    if (anyModalOpen()) root.className = "modal-open";
+    else root.className = "";
   }
 
   function modalError(id, messages) {

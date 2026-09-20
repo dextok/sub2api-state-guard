@@ -105,7 +105,9 @@ func (s *Store) ModelStatuses(accountID int64, size int, now time.Time) []ModelS
 				status.Grades[string(grade)] = count
 			}
 		}
-		// 先按撞到的先后倒序，第一张就是 Pick 会挑的那张（取最新的一张，剩余有效期最长）。
+		// 按撞到的先后倒序，第一张就是 Pick 会挑的那张。Pick 取 createdAt 最新的一张，
+		// 同一时刻撞到的多张里保留切片中靠前的那张，所以这里必须用稳定排序才对得上。
+		// （注意最新不等于剩余有效期最长：同批错峰会把一批票的到期时间撑开。）
 		live := make([]ticket, 0, len(pool.tickets))
 		for _, item := range pool.tickets {
 			if int(item.expiresAt.Sub(now)/time.Second) <= 0 {
@@ -113,7 +115,7 @@ func (s *Store) ModelStatuses(accountID int64, size int, now time.Time) []ModelS
 			}
 			live = append(live, item)
 		}
-		sort.Slice(live, func(i, j int) bool { return live[i].createdAt.After(live[j].createdAt) })
+		sort.SliceStable(live, func(i, j int) bool { return live[i].createdAt.After(live[j].createdAt) })
 		for index, item := range live {
 			remaining := int(item.expiresAt.Sub(now) / time.Second)
 			// 空的 proxy 表示这张票是直连撞到的；MaskProxy 会把空串打成 ***，

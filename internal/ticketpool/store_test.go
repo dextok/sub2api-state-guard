@@ -433,6 +433,35 @@ func TestModelStatusesListsTicketsNewestFirst(t *testing.T) {
 	}
 }
 
+func TestModelStatusesInUseMatchesPickOnTies(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	store := NewStore()
+	// 同一轮撞到的票 createdAt 完全相同，Pick 在并列里保留先入池的那张，
+	// 看板必须指到同一张，否则「下次注入」这个标记就是骗人的。
+	store.StoreRound(1, "m", []record{
+		{grade: GradeHealthy, state: "a-" + state(290), length: 292},
+		{grade: GradeHealthy, state: "b-" + state(290), length: 292},
+		{grade: GradeHealthy, state: "c-" + state(290), length: 292},
+	}, StoreParams{Cap: 5, TTLSeconds: 2700, StaggerSeconds: 300, MinTTLSeconds: 300, Size: 5}, now)
+
+	picked, ok := store.Pick(1, "m", now.Add(time.Second))
+	if !ok {
+		t.Fatalf("池里有票却挑不出来")
+	}
+	status := store.ModelStatuses(1, 5, now.Add(time.Second))[0]
+	if len(status.Tickets) != 3 {
+		t.Fatalf("列表 = %+v", status.Tickets)
+	}
+	if status.Tickets[0].Fingerprint != fingerprintState(picked) {
+		t.Fatalf("标成「下次注入」的不是 Pick 挑的那张: %+v", status.Tickets)
+	}
+	for _, item := range status.Tickets[1:] {
+		if item.InUse {
+			t.Fatalf("同时有多张被标成「下次注入」: %+v", status.Tickets)
+		}
+	}
+}
+
 func TestNoteRoundSurfacesOnDashboard(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	store := NewStore()

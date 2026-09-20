@@ -184,6 +184,89 @@ code {
   font-size: 12px;
 }
 
+/* 模型编辑器：一行行芯片 + 一个输入框。模型的增删是即时生效的，
+   所以它独占一块，不和下面「改完要点保存」的那些字段混在一个网格里。 */
+.model-editor {
+  margin-bottom: 12px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 1px 3px 1px 10px;
+  background: var(--card);
+  font-size: 12px;
+}
+
+.chip-x {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.chip-x:hover {
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.chip-x:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.model-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-add > input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.model-add > .btn {
+  flex: none;
+}
+
+/* 高级设置：默认折叠。日常只会动上面的模型清单，下面这些调好一次就不再碰。 */
+.advanced {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 10px;
+}
+
+.advanced > summary {
+  cursor: pointer;
+  padding: 8px 0;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.advanced[open] > summary {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+
+.advanced > .grid {
+  padding-bottom: 10px;
+}
+
 .hint {
   color: var(--text-muted);
   font-size: 11px;
@@ -585,10 +668,32 @@ td.col-actions {
   min-width: 0;
 }
 
-/* 待保存生效的占位卡：模型只在草稿里、还没建池，用虚线加淡显与实况卡区分开。 */
+/* 占位卡：模型刚写进生效配置，看板数据还没跟上，用虚线加淡显与实况卡区分开。 */
 .model-card-pending {
   border-style: dashed;
   opacity: 0.7;
+}
+
+/* 可点击的实况卡：点一下就能停掉这个模型（会先弹确认）。 */
+.model-card-actionable {
+  cursor: pointer;
+}
+
+.model-card-actionable:hover,
+.model-card-actionable:focus-visible {
+  border-color: var(--accent);
+}
+
+.model-card-remove {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+  flex: none;
+}
+
+.model-card-actionable:hover .model-card-remove,
+.model-card-actionable:focus-visible .model-card-remove {
+  color: var(--error-text);
 }
 
 .model-card-head {
@@ -604,6 +709,8 @@ td.col-actions {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .model-count {

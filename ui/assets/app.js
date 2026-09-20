@@ -129,6 +129,7 @@
   var busy = false;
   var accountIndex = -1; // -1 表示新增
   var proxyIndex = -1;
+  var pendingRemoveModel = ""; // 确认弹窗里待删的模型，空串表示没有
   var lastHeight = 0;
   var heightTimer = 0;
   var statusPending = false;
@@ -140,7 +141,6 @@
   // lastPayload 是最近一次看板结构化数据。改动模型清单时用它就地叠加草稿重绘卡片组，
   // 免得等下一次轮询——运行时数据在保存生效前本来也不会变。
   var lastPayload = null;
-  var modelsRerenderTimer = 0;
 
   // 通道降级提示：宿主 < 0.2.7 不认识 plugin.status（表现为超时），只能退回手动 config.test，
   // 且不该自动轮询——宿主对 config.test 做二次验证门控，轮询会反复触发它。
@@ -522,14 +522,9 @@
     ["tp-proxies-per-round", "proxies_per_round"],
     ["tp-retry-rounds", "retry_rounds"],
   ];
-  var TICKET_TEXTS = [
-    ["tp-gateway", "gateway_base_url"],
-    ["tp-user-agent", "user_agent"],
-  ];
-  var TICKET_FLAGS = [
-    ["tp-follow", "follow_observed_models"],
-    ["tp-include-direct", "include_direct"],
-  ];
+  // 网关地址、探针 User-Agent、include_direct 不在页面上展示（默认值就够用），
+  // 草稿里的原值随 clone 一路带过去，保存时原样回传，不会被页面抹掉。
+  var TICKET_FLAGS = [["tp-follow", "follow_observed_models"]];
   var PROXY_FLAGS = [["pp-enabled", "enabled"]];
 
   function writeSection(pairs, values, kind) {
@@ -546,24 +541,21 @@
     pairs.forEach(function (pair) {
       var input = el(pair[0]);
       if (kind === "flag") target[pair[1]] = input.checked;
-      else if (kind === "text") target[pair[1]] = input.value.trim() || defaults[pair[1]];
       else target[pair[1]] = intFromInput(input, defaults[pair[1]]);
     });
   }
 
-  // collectDraft 把页面上展示的项写回草稿。账号与代理列表只由弹窗和行内按钮改动，不在这里读。
+  // collectDraft 把页面上展示的项写回草稿。账号、代理与模型列表只由弹窗和行内按钮改动，
+  // 不在这里读。
   function collectDraft() {
     var next = clone(draft);
     var guard = next.overload_guard;
     guard.enabled = el("guard-enabled").checked;
 
     var ticket = guard.ticket_pool;
-    ticket.models = normalizeModels(el("tp-models").value.split(/\r?\n/));
     readSection(TICKET_NUMBERS, ticket, TICKET_DEFAULTS, "number");
-    readSection(TICKET_TEXTS, ticket, TICKET_DEFAULTS, "text");
     readSection(TICKET_FLAGS, ticket, TICKET_DEFAULTS, "flag");
     ticket.probe_effort = el("tp-effort").value;
-    ticket.gateway_base_url = ticket.gateway_base_url.replace(/\/+$/, "") || TICKET_DEFAULTS.gateway_base_url;
 
     readSection(PROXY_FLAGS, guard.proxy_pool, PROXY_DEFAULTS, "flag");
     return next;
@@ -578,9 +570,8 @@
     var guard = draft.overload_guard;
     el("guard-enabled").checked = guard.enabled;
 
-    el("tp-models").value = guard.ticket_pool.models.join("\n");
+    renderModelChips();
     writeSection(TICKET_NUMBERS, guard.ticket_pool, "number");
-    writeSection(TICKET_TEXTS, guard.ticket_pool, "text");
     writeSection(TICKET_FLAGS, guard.ticket_pool, "flag");
     el("tp-effort").value = guard.ticket_pool.probe_effort;
 
@@ -778,6 +769,10 @@
     busy = value;
     el("btn-save").disabled = value;
     el("btn-reload").disabled = value;
+    // 模型增删是即时提交的，提交在途时把这一组控件一起锁上，免得连点两次发出两份配置。
+    el("tp-model-add").disabled = value;
+    el("tp-model-new").disabled = value;
+    if (draft) renderModelChips();
   }
 
   function fatal(message) {
@@ -795,16 +790,25 @@
     }
   }
 
+  // modelNameError 单独成函数：「+ 添加模型」在点下去的那一刻就要给出同样的判定，
+  // 不能等到保存。返回空串表示没问题。
+  function modelNameError(model) {
+    if (byteLength(model) > MAX_MODEL_NAME_BYTES) {
+      return "模型名「" + model + "」超过 " + MAX_MODEL_NAME_BYTES + " 字节";
+    }
+    if (!MODEL_NAME_CHARS.test(model)) {
+      return "模型名「" + model + "」含非法字符，只能包含字母、数字与 - _ . : /";
+    }
+    return "";
+  }
+
   function validateTicket(ticket, errors) {
     if (ticket.models.length > MAX_POOL_MODELS) {
       errors.push("模型最多 " + MAX_POOL_MODELS + " 个，当前 " + ticket.models.length + " 个");
     }
     ticket.models.forEach(function (model) {
-      if (byteLength(model) > MAX_MODEL_NAME_BYTES) {
-        errors.push("模型名「" + model + "」超过 " + MAX_MODEL_NAME_BYTES + " 字节");
-      } else if (!MODEL_NAME_CHARS.test(model)) {
-        errors.push("模型名「" + model + "」含非法字符，只能包含字母、数字与 - _ . : /");
-      }
+      var message = modelNameError(model);
+      if (message !== "") errors.push(message);
     });
     if (ticket.models.length === 0 && !ticket.follow_observed_models) {
       errors.push("模型列表为空时必须开启「自动跟踪请求里出现的新模型」，否则不会为任何模型维护票池");
@@ -906,7 +910,8 @@
         }).length
       : 0;
     if (guard.enabled && hasEnabledAccount && !guard.ticket_pool.include_direct && activeProxies === 0) {
-      errors.push("已开启过载防护的账号无法撞票：「每轮也用直连打一发」已关闭，且没有启用任何代理");
+      errors.push("已开启过载防护的账号无法撞票：没有启用任何代理，而配置里的 include_direct"
+        + "（每轮也用直连打一发）是关的——启用一条代理，或走管理端的插件配置接口把它打开");
     }
     return errors;
   }
@@ -914,7 +919,7 @@
   /* ---------- 弹窗 ---------- */
 
   function anyModalOpen() {
-    return !el("account-modal").hidden || !el("proxy-modal").hidden;
+    return !el("account-modal").hidden || !el("proxy-modal").hidden || !el("model-modal").hidden;
   }
 
   function openModal(id) {
@@ -927,6 +932,7 @@
     el(id).hidden = true;
     accountIndex = -1;
     proxyIndex = -1;
+    pendingRemoveModel = "";
     lastHeight = 0;
     reportHeight();
   }
@@ -1072,6 +1078,133 @@
     showDiagnostic("", "代理改动已写入草稿，记得点「保存」。");
   }
 
+  /* ---------- 模型清单（增删即时生效） ---------- */
+
+  // 模型的增删不走「改草稿 → 点保存」那条路：加一个模型就是让插件立刻开始为它撞票，
+  // 删一个就是立刻停止撞票与注入，中间夹一步「保存」只会让人以为还没生效。
+  // 代价是这里必须单独提交，见 commitModels。
+  function renderModelChips() {
+    var models = draft ? draft.overload_guard.ticket_pool.models : [];
+    var box = el("tp-model-chips");
+    box.textContent = "";
+    models.forEach(function (model) {
+      var chip = node("span", "chip");
+      chip.appendChild(node("span", "chip-name", model));
+      var remove = node("button", "chip-x", "×");
+      remove.type = "button";
+      remove.title = "停止维护 " + model;
+      remove.setAttribute("aria-label", "删除模型 " + model);
+      remove.disabled = busy;
+      remove.addEventListener("click", function () {
+        askRemoveModel(model);
+      });
+      chip.appendChild(remove);
+      box.appendChild(chip);
+    });
+    el("tp-model-empty").hidden = models.length > 0;
+  }
+
+  function addModelFromInput() {
+    if (!draft || busy) return;
+    var input = el("tp-model-new");
+    var model = input.value.trim();
+    if (model === "") {
+      showDiagnostic("bad", "先填一个模型名再点「添加模型」。");
+      return;
+    }
+    var models = draft.overload_guard.ticket_pool.models;
+    if (models.indexOf(model) >= 0) {
+      showDiagnostic("bad", "模型「" + model + "」已经在清单里了。");
+      return;
+    }
+    if (models.length >= MAX_POOL_MODELS) {
+      showDiagnostic("bad", "模型最多 " + MAX_POOL_MODELS + " 个，先删掉一个再加。");
+      return;
+    }
+    var nameError = modelNameError(model);
+    if (nameError !== "") {
+      showDiagnostic("bad", nameError);
+      return;
+    }
+    commitModels(models.concat([model]), "已添加「" + model + "」，插件已开始为它撞票；撞到满血票就会注入。")
+      .then(function (ok) {
+        if (ok) input.value = "";
+      });
+  }
+
+  function askRemoveModel(model) {
+    if (!draft || busy) return;
+    var ticket = draft.overload_guard.ticket_pool;
+    var configured = ticket.models.indexOf(model) >= 0;
+    pendingRemoveModel = configured ? model : "";
+
+    var lines;
+    if (!configured) {
+      // 清单里没有它，说明它是 follow_observed_models 从真实请求里认出来的。
+      // 把它从清单里删掉这件事无从谈起，只能关掉自动跟踪。
+      lines = "「" + model + "」不在模型清单里，是「自动跟踪请求里出现的新模型」认出来的。"
+        + "要停掉它，就得关掉那个开关再保存——但那样所有自动跟踪的模型都会一起停。";
+    } else {
+      lines = "删除后插件立刻停止为「" + model + "」撞票，这个模型的请求也不再注入算力票"
+        + "（请求本身照常转发，只是不受保护）。已经撞到的票会随配置生效一起丢弃。";
+      if (ticket.follow_observed_models) {
+        lines += "注意：「自动跟踪请求里出现的新模型」是开着的，只要还有请求打这个模型，"
+          + "它就会被重新跟上、继续撞票。";
+      }
+    }
+    el("model-modal-text").textContent = lines;
+    el("model-modal-confirm").hidden = !configured;
+    openModal("model-modal");
+  }
+
+  function confirmModelModal() {
+    var model = pendingRemoveModel;
+    if (model === "") return;
+    var models = draft.overload_guard.ticket_pool.models.filter(function (name) {
+      return name !== model;
+    });
+    closeModal("model-modal");
+    commitModels(models, "已删除「" + model + "」，插件已停止为它撞票与注入。");
+  }
+
+  // commitModels 把新的模型清单单独存一次。底稿取「已保存生效」的那份而不是当前草稿：
+  // 页面上别的字段可能改了一半还没保存，模型增删不该顺手把它们一起提交上去，
+  // 也不该把它们冲掉——所以保存成功后只把模型清单同步回草稿，其余原样留着。
+  function commitModels(models, okMessage) {
+    if (busy) return Promise.resolve(false);
+    var base = JSON.parse(savedJSON);
+    base.overload_guard.ticket_pool.models = models.slice();
+    var errors = validateDraft(base);
+    if (errors.length > 0) {
+      showDiagnostic("bad", "模型清单未生效：\n" + errors.join("\n"));
+      return Promise.resolve(false);
+    }
+    setBusy(true);
+    return bridge
+      .saveConfig(base)
+      .then(function (config) {
+        var applied = normalizeConfig(config);
+        savedJSON = JSON.stringify(applied);
+        draft.overload_guard.ticket_pool.models = applied.overload_guard.ticket_pool.models.slice();
+        renderModelChips();
+        renderHead();
+        if (lastPayload) renderStatusAccounts(lastPayload);
+        showDiagnostic("ok", okMessage);
+        // 票池刚重建过，看板数字都变了；只读通道能直接拉一次，test 通道得管理员自己点。
+        if (statusChannel === "status") refreshStatus();
+        return true;
+      })
+      .catch(function (error) {
+        showDiagnostic("bad", "模型清单未生效：" + error.message);
+        bridge.notify("error", "模型清单未生效：" + error.message);
+        return false;
+      })
+      .then(function (ok) {
+        setBusy(false); // 顺带重绘芯片，恢复上面被禁用的 ×
+        return ok;
+      });
+  }
+
   /* ---------- 实时看板 ---------- */
 
   // splitStatus 把哨兵行从展示文本里摘出来：前面是给人看的几行，最后一行是结构化数据。
@@ -1171,11 +1304,26 @@
   }
 
   function renderModelCard(model, poolSize) {
-    var card = node("div", "model-card" + (model.pending ? " model-card-pending" : ""));
+    var card = node("div", "model-card model-card-actionable" + (model.pending ? " model-card-pending" : ""));
+    card.setAttribute("role", "button");
+    card.setAttribute("tabindex", "0");
+    card.title = "点一下停止维护 " + model.model;
+    card.addEventListener("click", function () {
+      // 卡片上有 detail 文本，选中一段再松手也会冒出 click；有选区就当没点过。
+      if (window.getSelection && String(window.getSelection()) !== "") return;
+      askRemoveModel(model.model);
+    });
+    card.addEventListener("keydown", function (event) {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      askRemoveModel(model.model);
+    });
+
     var head = node("div", "model-card-head");
     head.appendChild(node("span", "model-name", model.model));
     var size = model.size || poolSize || 0;
     head.appendChild(node("span", "model-count", (model.valid || 0) + " / " + size));
+    head.appendChild(node("span", "model-card-remove", "×"));
     card.appendChild(head);
 
     var meter = node("div", "meter");
@@ -1185,10 +1333,10 @@
     meter.appendChild(fill);
     card.appendChild(meter);
 
-    // pending：模型只在当前草稿里、还没写进生效配置，运行时自然没有它的票池数据。
-    // 只摆一张占位卡说明「保存后才建池」，不去渲染那些它根本没有的实况字段。
+    // pending：模型已经写进生效配置了，但这张卡片用的是上一次拉到的看板数据，那时还没有它。
+    // 只摆一张占位卡，不去渲染那些它这一刻还没有的实况字段。
     if (model.pending) {
-      card.appendChild(node("div", "model-meta", "待保存生效：这个模型还没写进已生效的配置，保存后插件才会为它建池撞票。"));
+      card.appendChild(node("div", "model-meta", "已生效，插件正在为它建池撞票；下一次刷新状态就能看到票数。"));
       return card;
     }
 
@@ -1222,10 +1370,10 @@
     return card;
   }
 
-  // mergeStatusModels 把「运行时实况」与「当前草稿里的模型清单」并成一组卡片：
-  // 先按清单顺序摆——运行时有数据的用数据，没有的做「待保存生效」占位——再补上运行时里有、
-  // 但清单没列的（follow_observed_models 自动跟踪出来的）模型。这样管理员往清单里加一行，
-  // 上方立刻多出一张占位卡；删一行则该模型仍以实况卡留着，它得等保存生效后才真正停止维护。
+  // mergeStatusModels 把「运行时实况」与「已生效的模型清单」并成一组卡片：
+  // 先按清单顺序摆——运行时有数据的用数据，没有的做占位卡——再补上运行时里有、但清单没列的
+  // （follow_observed_models 自动跟踪出来的）模型。模型的增删是即时生效的，所以刚加的模型
+  // 上方立刻多出一张占位卡，刚删的模型则马上从清单里消失（若它仍被自动跟踪着，会以实况卡留着）。
   function mergeStatusModels(account, poolSize, draftModels) {
     var runtime = Array.isArray(account.models) ? account.models : [];
     var byName = {};
@@ -1288,8 +1436,8 @@
   }
 
   // renderStatusAccounts 渲染上方「账号 × 模型」的算力票卡片组。拆成独立函数，是为了在
-  // 模型清单被编辑时能就地重绘（见 scheduleAccountsRerender）：那时运行时数据还没变
-  // （改动尚未保存生效），所以用最近一次看板数据（lastPayload）叠加当前草稿的模型清单。
+  // 模型清单变动后能就地重绘：模型增删虽然即时生效，但运行时数据要等下一次刷新才更新，
+  // 所以用最近一次看板数据（lastPayload）叠加当前的模型清单。
   function renderStatusAccounts(payload) {
     var box = el("status-accounts");
     box.textContent = "";
@@ -1340,19 +1488,6 @@
     if (!view.success && view.text) notes.push(view.text);
     setStatusError(noteLines(notes.join("\n")));
     reportHeight();
-  }
-
-  // scheduleAccountsRerender 在模型清单变动后就地重绘卡片组（防抖，免得逐字符敲键时闪烁）。
-  // syncDraft 已把新清单写进草稿，这里据此叠加 lastPayload 重绘；没有结构化票况时直接跳过，
-  // 免得把「无数据」提示覆盖成空卡片组。
-  function scheduleAccountsRerender() {
-    if (!lastPayload) return;
-    if (modelsRerenderTimer) window.clearTimeout(modelsRerenderTimer);
-    modelsRerenderTimer = window.setTimeout(function () {
-      modelsRerenderTimer = 0;
-      renderStatusAccounts(lastPayload);
-      reportHeight();
-    }, 250);
   }
 
   // noteLines 把通道降级提示固定挂在状态区最前面，后面才是本次读取的问题。
@@ -1561,8 +1696,8 @@
   /* ---------- 初始化 ---------- */
 
   function bindFormEvents() {
-    var ids = ["tp-models", "tp-effort", "guard-enabled"];
-    TICKET_NUMBERS.concat(TICKET_TEXTS, TICKET_FLAGS, PROXY_FLAGS).forEach(function (pair) {
+    var ids = ["tp-effort", "guard-enabled"];
+    TICKET_NUMBERS.concat(TICKET_FLAGS, PROXY_FLAGS).forEach(function (pair) {
       ids.push(pair[0]);
     });
     ids.forEach(function (id) {
@@ -1574,10 +1709,11 @@
     // 过载防护总开关同理会改账号表的状态标签（「总开关已关闭」）。
     el("pp-enabled").addEventListener("change", renderProxies);
     el("guard-enabled").addEventListener("change", renderAccounts);
-    // 模型清单一变，上方的账号模型算力票卡片组要跟着更新。syncDraft 已在前面注册、会先跑，
-    // 把新清单写进草稿，这里据此就地重绘（防抖）。
-    el("tp-models").addEventListener("input", scheduleAccountsRerender);
-    el("tp-models").addEventListener("change", scheduleAccountsRerender);
+    // 高级设置展开/收起会改变页面高度，得重新向宿主报一次。
+    el("tp-advanced").addEventListener("toggle", function () {
+      lastHeight = 0;
+      reportHeight();
+    });
   }
 
   function init() {
@@ -1596,10 +1732,18 @@
       if (busy) return;
       load().then(function () {
         showDiagnostic("", "已重新载入已保存的配置。");
-        // 草稿里的模型清单被换回已保存那份，上方卡片组里的「待保存生效」占位也要跟着退掉。
+        // 模型清单随之换回已保存那份，上方卡片组要跟着退回去。
         if (lastPayload) renderStatusAccounts(lastPayload);
       });
     });
+
+    el("tp-model-add").addEventListener("click", addModelFromInput);
+    el("tp-model-new").addEventListener("keydown", function (event) {
+      if (event.key !== "Enter") return;
+      event.preventDefault(); // 在表单里回车默认会触发保存，这里只想加一个模型
+      addModelFromInput();
+    });
+    el("model-modal-confirm").addEventListener("click", confirmModelModal);
 
     el("account-add").addEventListener("click", function () {
       openAccountModal(-1);
@@ -1619,14 +1763,15 @@
         closeModal(button.getAttribute("data-close"));
       });
     });
-    ["account-modal", "proxy-modal"].forEach(function (id) {
+    ["account-modal", "proxy-modal", "model-modal"].forEach(function (id) {
       el(id).addEventListener("click", function (event) {
         if (event.target === el(id)) closeModal(id);
       });
     });
     document.addEventListener("keydown", function (event) {
       if (event.key !== "Escape") return;
-      if (!el("proxy-modal").hidden) closeModal("proxy-modal");
+      if (!el("model-modal").hidden) closeModal("model-modal");
+      else if (!el("proxy-modal").hidden) closeModal("proxy-modal");
       else if (!el("account-modal").hidden) closeModal("account-modal");
     });
 

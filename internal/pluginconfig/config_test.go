@@ -40,8 +40,16 @@ func TestParseEmptyYieldsDefaults(t *testing.T) {
 		if pool.GatewayBaseURL != DefaultGatewayBaseURL || pool.UserAgent != DefaultUserAgent {
 			t.Fatalf("Parse(%q) 网关默认值不正确: %+v", raw, pool)
 		}
-		if len(pool.Models) != len(DefaultPoolModels()) {
-			t.Fatalf("Parse(%q) 默认模型列表 = %v", raw, pool.Models)
+		// 配置页上的模型清单直接来自这里：没配过 models 的部署一上来就维护这四个模型，
+		// 管理员再自己加减。名字必须逐个对上，少一个就意味着那个模型的池根本不会建。
+		want := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra"}
+		if len(pool.Models) != len(want) {
+			t.Fatalf("Parse(%q) 默认模型列表 = %v，期望 %v", raw, pool.Models, want)
+		}
+		for i, model := range want {
+			if pool.Models[i] != model {
+				t.Fatalf("Parse(%q) 默认模型列表 = %v，期望 %v", raw, pool.Models, want)
+			}
 		}
 		proxies := guard.ProxyPool
 		if !proxies.Enabled || len(proxies.Proxies) != 0 {
@@ -227,6 +235,30 @@ func TestTicketPoolValidation(t *testing.T) {
 // 满血判定不再看 state 长度，曾经的两个键（全局的 target_state_length 与按模型的
 // model_state_lengths）被移除。宿主里存着的旧配置还带着它们，而解析是
 // DisallowUnknownFields 的——必须接受并忽略，否则升级后第一次 ApplyConfig 就整体失败。
+// 配置页允许把模型一个个删光。显式的空清单必须原样留着——要是被默认值填回去，
+// 管理员删掉的模型下一次保存又自己长回来了。
+func TestExplicitEmptyModelsSurvivesNormalization(t *testing.T) {
+	config, err := Parse([]byte(`{"overload_guard":{"ticket_pool":{"models":[],
+		"follow_observed_models":true}}}`))
+	if err != nil {
+		t.Fatalf("Parse 出错: %v", err)
+	}
+	if len(config.OverloadGuard.TicketPool.Models) != 0 {
+		t.Fatalf("显式空清单被改写成了 %v", config.OverloadGuard.TicketPool.Models)
+	}
+	encoded, err := config.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal 出错: %v", err)
+	}
+	again, err := Parse(encoded)
+	if err != nil {
+		t.Fatalf("回灌出错: %v", err)
+	}
+	if len(again.OverloadGuard.TicketPool.Models) != 0 {
+		t.Fatalf("回灌后空清单变成了 %v", again.OverloadGuard.TicketPool.Models)
+	}
+}
+
 func TestLegacyStateLengthKeysIgnored(t *testing.T) {
 	config, err := Parse([]byte(`{"overload_guard":{"ticket_pool":{"pool_size":3,
 		"target_state_length":292,

@@ -29,6 +29,7 @@
     probe_effort: "low",
     proxies_per_round: 4,
     retry_rounds: 3,
+    target_state_length: 292,
     include_direct: true,
     gateway_base_url: "https://chatgpt.com/backend-api/codex",
     user_agent: "codex_cli_rs/0.154.0",
@@ -76,6 +77,7 @@
   var MAX_PROXY_NAME_BYTES = 40;
   var MAX_MODEL_NAME_BYTES = 120;
   var MAX_USER_AGENT_BYTES = 200;
+  var MAX_TARGET_STATE_LENGTH = 8192;
   var MIN_SNIFF = 1024;
   var MAX_SNIFF = 1048576;
 
@@ -108,6 +110,7 @@
     weak: "弱",
     unverified: "未确认",
     downgraded: "降级",
+    mismatch: "长度不符",
     partial: "半截",
     overloaded: "过载",
     blocked: "被拦",
@@ -415,6 +418,8 @@
       probe_effort: PROBE_EFFORTS.indexOf(effort) >= 0 ? effort : TICKET_DEFAULTS.probe_effort,
       proxies_per_round: pickInt(source.proxies_per_round, TICKET_DEFAULTS.proxies_per_round),
       retry_rounds: pickInt(source.retry_rounds, TICKET_DEFAULTS.retry_rounds),
+      // 0 是合法取值（不按长度过滤），负数一律收敛成它，与插件侧的规范化一致。
+      target_state_length: Math.max(0, pickInt(source.target_state_length, TICKET_DEFAULTS.target_state_length)),
       include_direct: pickBool(source.include_direct, TICKET_DEFAULTS.include_direct),
       gateway_base_url: pickString(source.gateway_base_url, TICKET_DEFAULTS.gateway_base_url).trim()
         .replace(/\/+$/, "") || TICKET_DEFAULTS.gateway_base_url,
@@ -558,6 +563,9 @@
     readSection(TICKET_NUMBERS, ticket, TICKET_DEFAULTS, "number");
     readSection(TICKET_FLAGS, ticket, TICKET_DEFAULTS, "flag");
     ticket.probe_effort = el("tp-effort").value;
+    // 满血票长度不能走 readSection：清空它的意思是「不按长度过滤」（0），
+    // 而不是像其它数字框那样恢复默认值。
+    ticket.target_state_length = intFromInput(el("tp-target-length"), 0);
 
     readSection(PROXY_FLAGS, guard.proxy_pool, PROXY_DEFAULTS, "flag");
     return next;
@@ -576,6 +584,10 @@
     writeSection(TICKET_NUMBERS, guard.ticket_pool, "number");
     writeSection(TICKET_FLAGS, guard.ticket_pool, "flag");
     el("tp-effort").value = guard.ticket_pool.probe_effort;
+    // 0 在页面上就是一个空框：它代表「不过滤」，写成 "0" 会让人以为长度必须等于 0。
+    el("tp-target-length").value = guard.ticket_pool.target_state_length > 0
+      ? String(guard.ticket_pool.target_state_length)
+      : "";
 
     writeSection(PROXY_FLAGS, guard.proxy_pool, "flag");
 
@@ -826,6 +838,10 @@
     }
     checkRange("每轮并用代理数", ticket.proxies_per_round, 0, 32, errors);
     checkRange("失败重试轮数", ticket.retry_rounds, 0, 10, errors);
+    // 0 是「不按长度过滤」，跳过区间检查；其余值要落在探针可能收到的长度里。
+    if (ticket.target_state_length !== 0) {
+      checkRange("满血票长度", ticket.target_state_length, 1, MAX_TARGET_STATE_LENGTH, errors);
+    }
     var gatewayError = plainURLError("网关地址", ticket.gateway_base_url);
     if (gatewayError !== "") errors.push(gatewayError);
     if (byteLength(ticket.user_agent) > MAX_USER_AGENT_BYTES) {
@@ -1781,7 +1797,7 @@
   }
 
   function bindFormEvents() {
-    var ids = ["tp-effort", "guard-enabled"];
+    var ids = ["tp-effort", "guard-enabled", "tp-target-length"];
     TICKET_NUMBERS.concat(TICKET_FLAGS, PROXY_FLAGS).forEach(function (pair) {
       ids.push(pair[0]);
     });

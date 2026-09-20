@@ -85,6 +85,9 @@ func newManagerHarness(t *testing.T, tune func(*pluginconfig.Ticket), proxies Pr
 	ticket.CheckIntervalSeconds = 3600
 	ticket.ProbeTimeoutSeconds = 5
 	ticket.GatewayBaseURL = stub.server.URL + "/backend-api/codex"
+	// 补池编排与「满血票长度」无关，默认关掉这道可选条件，免得每个用例都要迁就
+	// 假桩铸出来的长度。要验长度过滤的用例自己 tune 它（见 TestRefillRejectsWrongLength）。
+	ticket.TargetStateLength = 0
 	if tune != nil {
 		tune(&ticket)
 	}
@@ -178,6 +181,32 @@ func TestRefillFillsPoolAndServesValue(t *testing.T) {
 	}
 	if reason := harness.manager.Status().Accounts[0].Models[0].Reason; reason != "full" {
 		t.Fatalf("判定 = %q，期望 full", reason)
+	}
+}
+
+// 设了「满血票长度」时，长度对不上的票在补池这一层就被挡住，卡片上记「长度不符」。
+func TestRefillRejectsWrongLength(t *testing.T) {
+	harness := newManagerHarness(t, func(ticket *pluginconfig.Ticket) {
+		ticket.TargetStateLength = 312
+	}, nil)
+	harness.harvest(managedAccount)
+
+	// 假桩铸的是 292 的票，和设定的 312 对不上。
+	if added := harness.manager.Refill(context.Background(), managedAccount, "gpt-5-codex"); added != 0 {
+		t.Fatalf("长度不符不该入池，实际 %d 张", added)
+	}
+	model := harness.manager.Status().Accounts[0].Models[0]
+	if model.Grades[string(GradeMismatch)] == 0 {
+		t.Fatalf("卡片应当记着长度不符的计数: %+v", model.Grades)
+	}
+	if !strings.Contains(model.Detail, "312") {
+		t.Fatalf("detail 应当点明设定值，得到 %q", model.Detail)
+	}
+
+	// 换成上游真的在铸的长度就收得下。
+	harness.stub.replyServed(http.StatusOK, state(312))
+	if added := harness.manager.Refill(context.Background(), managedAccount, "gpt-5-codex"); added != 1 {
+		t.Fatalf("长度对上应当补入 1 张，实际 %d 张", added)
 	}
 }
 

@@ -20,9 +20,11 @@ import (
 
 // Grade 是一次探针结果的分级：
 //
-//	healthy    满血：200 + 有产出 + 上游自报的模型与请求的模型一致 —— 唯一入池
+//	healthy    满血：200 + 有产出 + 上游自报的模型与请求的模型一致（设了满血票长度时
+//	           还要长度对得上）—— 唯一入池
 //	downgraded 上游实际返回的模型与请求的不是同一个（例如请求 gpt-6-astra 却由
 //	           gpt-5.6-luna 服务），这张票不属于该模型，不入池
+//	mismatch   模型对得上，但 state 长度与配置的「满血票长度」不符，不入池
 //	unverified 200 + 有产出，但上游没回报模型名，确认不了这是不是该模型的票，不入池
 //	overloaded 过载：SSE error 里带 overload，上游明确表示这个节点现在不接活
 //	weak       非 200 但带回了 state 头
@@ -30,12 +32,14 @@ import (
 //	partial    200 但既无产出也未完成
 //	error      连接异常等，连响应都没拿到
 //
-// state 的长度不参与判定：它因模型、因上游版本而异，拿它当标准只会误杀或误收。
+// 长度只是可选的附加条件：它因模型、因上游版本而异（实测 5.5 是 292，premium 是 312），
+// 配置里留空就完全不看，光靠模型名判定。
 type Grade string
 
 const (
 	GradeHealthy    Grade = "healthy"
 	GradeDowngraded Grade = "downgraded"
+	GradeMismatch   Grade = "mismatch"
 	GradeUnverified Grade = "unverified"
 	GradeOverloaded Grade = "overloaded"
 	GradeWeak       Grade = "weak"
@@ -49,7 +53,7 @@ const (
 // 入池只看 healthy（见 Store.StoreRound），其余分级的先后只影响摘要与日志里的展示顺序。
 var gradeRank = map[Grade]int{
 	GradeHealthy: 0, GradeWeak: 1, GradeUnverified: 2, GradeDowngraded: 3,
-	GradePartial: 4, GradeOverloaded: 5, GradeBlocked: 6, GradeError: 7,
+	GradeMismatch: 4, GradePartial: 5, GradeOverloaded: 6, GradeBlocked: 7, GradeError: 8,
 }
 
 const (
@@ -158,11 +162,13 @@ func (p *prober) probe(ctx context.Context, cred Credential, model, proxyURL str
 		return out
 	}
 	if stream.hasText || (stream.completed && !stream.completedFailed) {
-		// 满血判定只有两条：HTTP 200 有产出，且上游自报的模型就是请求的模型。
+		// 满血的基本判定有两条：HTTP 200 有产出，且上游自报的模型就是请求的模型。
 		//
 		// 降级时（例如账号的 gpt-6-astra 权限被收走，上游改用 gpt-5.6-luna 顶上）
 		// 铸出来的 state 和满血票长得一模一样，长度分不出来——能分出来的只有模型名。
+		// 「满血票长度」是管理员可选的第三条：设了就再卡一道，留空就不看。
 		served := stream.servedModel
+		target := p.config.TargetStateLength
 		switch {
 		case served == "":
 			// 上游连 model 字段都没给：确认不了这张票属于谁，宁可不收。
@@ -177,6 +183,10 @@ func (p *prober) probe(ctx context.Context, cred Credential, model, proxyURL str
 				// served 是上游给的外部输入，detail 会经看板回到浏览器，认不出来就不回显原文。
 				out.detail = "上游返回的模型名与请求的不一致，这张票不属于该模型，不入池"
 			}
+		case target > 0 && out.length != target:
+			out.grade = GradeMismatch
+			out.detail = detailOf(fmt.Sprintf(
+				"state 长 %d，与设定的满血票长度 %d 不符，不入池", out.length, target))
 		default:
 			out.grade = GradeHealthy
 		}

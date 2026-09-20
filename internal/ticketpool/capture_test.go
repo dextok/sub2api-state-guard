@@ -144,6 +144,9 @@ func probeOnce(t *testing.T, stub *captureStub, cred Credential, tune func(*plug
 	return newProber(t, stub, tune).probe(context.Background(), cred, "gpt-5-codex", "")
 }
 
+// noLength 关掉「满血票长度」这道可选的附加条件，只留「200 + 模型一致」的基本判定。
+func noLength(config *pluginconfig.Ticket) { config.TargetStateLength = 0 }
+
 func testCredential() Credential {
 	return Credential{Authorization: "Bearer " + strings.Repeat("a", 40), AccountHeader: "acct-9"}
 }
@@ -159,7 +162,7 @@ func TestProbeGrading(t *testing.T) {
 	}{
 		{"满血", 200, state(292), sseServed, GradeHealthy},
 		{"只有 completed 也算有产出", 200, state(292), sseCompletedAs(probeModel), GradeHealthy},
-		{"长度不标准也照收", 200, state(7), sseServed, GradeHealthy},
+		{"没设满血票长度时长度不标准也照收", 200, state(7), sseServed, GradeHealthy},
 		{"上游没回报模型名", 200, state(292), sseText, GradeUnverified},
 		{"上游换了模型", 200, state(292), sseCreatedAs("gpt-5.6-luna") + sseText, GradeDowngraded},
 		{"降智", 200, state(292), sseOverload, GradeOverloaded},
@@ -174,7 +177,7 @@ func TestProbeGrading(t *testing.T) {
 			stub := newCaptureStub(t)
 			stub.reply(testCase.status, testCase.state, testCase.body)
 
-			got := probeOnce(t, stub, testCredential(), nil)
+			got := probeOnce(t, stub, testCredential(), noLength)
 			if got.grade != testCase.want {
 				t.Fatalf("分级 = %s，期望 %s（detail=%q）", got.grade, testCase.want, got.detail)
 			}
@@ -188,10 +191,45 @@ func TestProbeGrading(t *testing.T) {
 	}
 }
 
-// state 的长度不参与判定：长度因模型、因上游版本而异，只要模型对得上就是满血票。
-func TestProbeIgnoresStateLength(t *testing.T) {
+// 设了「满血票长度」时，它是模型判定之外的附加条件：模型对得上但长度不符照样不入池。
+func TestProbeChecksStateLengthWhenSet(t *testing.T) {
 	stub := newCaptureStub(t)
-	prober := newProber(t, stub, nil)
+	prober := newProber(t, stub, func(config *pluginconfig.Ticket) { config.TargetStateLength = 312 })
+
+	stub.reply(http.StatusOK, state(312), sseCreatedAs("gpt-6-astra")+sseText)
+	if got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", ""); got.grade != GradeHealthy {
+		t.Fatalf("长度正好对上应当是 healthy，得到 %s（detail=%q）", got.grade, got.detail)
+	}
+
+	stub.reply(http.StatusOK, state(292), sseCreatedAs("gpt-6-astra")+sseText)
+	got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", "")
+	if got.grade != GradeMismatch {
+		t.Fatalf("长度不符应当是 mismatch，得到 %s（detail=%q）", got.grade, got.detail)
+	}
+	if !strings.Contains(got.detail, "292") || !strings.Contains(got.detail, "312") {
+		t.Fatalf("detail 应当同时给出实际长度与设定值，得到 %q", got.detail)
+	}
+	if got.length != 292 {
+		t.Fatalf("长度仍然要如实记录，得到 %d", got.length)
+	}
+	// 只有 healthy 入池。
+	store := NewStore()
+	if added := store.StoreRound(1, "gpt-6-astra", []record{got}, storeParams(3), time.Unix(1700000000, 0)); added != 0 {
+		t.Fatalf("长度不符的票入池了 %d 张", added)
+	}
+
+	// 模型先判：模型都不对时，报「降级」比报「长度不符」更能说明问题。
+	stub.reply(http.StatusOK, state(292), sseCreatedAs("gpt-5.6-luna")+sseText)
+	if got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", ""); got.grade != GradeDowngraded {
+		t.Fatalf("模型与长度都不对时应当报 downgraded，得到 %s", got.grade)
+	}
+}
+
+// 「满血票长度」留空（0）时 state 的长度不参与判定：长度因模型、因上游版本而异，
+// 只要模型对得上就是满血票。
+func TestProbeIgnoresStateLengthWhenUnset(t *testing.T) {
+	stub := newCaptureStub(t)
+	prober := newProber(t, stub, noLength)
 
 	for _, length := range []int{1, 292, 312, 1024} {
 		stub.reply(http.StatusOK, state(length), sseCreatedAs("gpt-6-astra")+sseText)
@@ -210,7 +248,7 @@ func TestProbeIgnoresStateLength(t *testing.T) {
 func TestProbeDetectsServedModelDowngrade(t *testing.T) {
 	stub := newCaptureStub(t)
 	stub.reply(http.StatusOK, state(312), sseCreatedAs("gpt-5.6-luna")+sseText)
-	prober := newProber(t, stub, nil)
+	prober := newProber(t, stub, noLength)
 
 	got := prober.probe(context.Background(), testCredential(), "gpt-6-astra", "")
 	if got.grade != GradeDowngraded {

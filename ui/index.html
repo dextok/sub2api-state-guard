@@ -67,8 +67,9 @@
                 <button type="button" class="info-btn" aria-label="关于票池" aria-describedby="note-ticket">i</button>
                 <span class="info-pop" id="note-ticket" role="tooltip">
                   插件自己向网关发探针请求「撞票」：只有<strong>响应 200 有产出、且上游自报的模型
-                  就是请求的那个模型</strong>的票才会入池。state 的长度不参与判定——它因模型、
-                  因上游版本而异，拿它当标准只会误杀或误收。「高级设置」里的数字框留空表示恢复默认值。
+                  就是请求的那个模型</strong>的票才会入池。「高级设置」里还可以填一个<strong>满血票长度</strong>
+                  再多卡一道（默认 292，长度对不上的判「长度不符」）；那一项留空就完全不看长度——
+                  满血长度因模型、因上游版本而异，拿它当硬标准会误杀。其余数字框留空表示恢复默认值。
                   网关地址、探针 User-Agent、「每轮也用直连打一发」用默认值即可，页面上不再展示，
                   确实要改的话走管理端的插件配置接口。
                 </span>
@@ -158,6 +159,11 @@
                 <span class="label">失败重试轮数</span>
                 <input type="number" id="tp-retry-rounds" min="0" max="10" step="1" inputmode="numeric" />
                 <em class="hint">0-10，默认 3。一轮没撞到满血票时换没用过的代理再试；总探测轮数 = 1 + 这个数</em>
+              </label>
+              <label class="field">
+                <span class="label">满血票长度</span>
+                <input type="number" id="tp-target-length" min="1" max="8192" step="1" inputmode="numeric" placeholder="留空则不看长度" />
+                <em class="hint">默认 292。填了就在「200 + 模型一致」之外再卡一道：state 长度对不上的判「长度不符」，不入池。留空不过滤——满血长度因模型而异（实测 5.5 是 292，premium 是 312）</em>
               </label>
             </div>
           </details>

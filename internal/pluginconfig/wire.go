@@ -53,14 +53,14 @@ type wireTicket struct {
 	ProbeEffort            *string   `json:"probe_effort"`
 	ProxiesPerRound        *int      `json:"proxies_per_round"`
 	RetryRounds            *int      `json:"retry_rounds"`
+	TargetStateLength      *int      `json:"target_state_length"`
 	IncludeDirect          *bool     `json:"include_direct"`
 	GatewayBaseURL         *string   `json:"gateway_base_url"`
 	UserAgent              *string   `json:"user_agent"`
 
-	// 已移除的字段：满血判定曾经看 state 长度（全局一个数，后来改成按模型一张表），
-	// 现在的标准是「200 + 上游自报的模型与请求的一致」，长度不再参与。
-	// 旧配置里还留着这两个键，接受并忽略，下一次保存时它们就会从存储里消失。
-	TargetStateLength *json.RawMessage `json:"target_state_length"`
+	// 已移除的字段：满血长度曾经还有一张按模型的覆盖表，现在只剩全局一个
+	// target_state_length（且可以留空不过滤）。旧配置里还留着这个键，接受并忽略，
+	// 下一次保存时它就会从存储里消失。
 	ModelStateLengths *json.RawMessage `json:"model_state_lengths"`
 }
 
@@ -161,6 +161,8 @@ func (w wireTicket) merge(base Ticket) Ticket {
 	mergeString(&out.ProbeEffort, w.ProbeEffort)
 	mergeInt(&out.ProxiesPerRound, w.ProxiesPerRound)
 	mergeInt(&out.RetryRounds, w.RetryRounds)
+	// 显式的 0 要保留（那是「不按长度过滤」），所以走指针判空而不是判零值。
+	mergeInt(&out.TargetStateLength, w.TargetStateLength)
 	mergeBool(&out.IncludeDirect, w.IncludeDirect)
 	mergeString(&out.GatewayBaseURL, w.GatewayBaseURL)
 	mergeString(&out.UserAgent, w.UserAgent)

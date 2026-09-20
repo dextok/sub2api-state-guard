@@ -88,8 +88,8 @@ const (
 
 // 票池默认值全部对齐参考实现 codex-ticket-pool（backend/app/config.py）。
 //
-// 这里没有「满血票长度」：满血的判定标准是「HTTP 200 + 上游自报的模型与请求的模型一致」，
-// 与 state 的长度无关（长度因模型、因上游版本而异，拿它当标准只会误杀或误收）。
+// 「满血票长度」是可选的附加条件：满血的基本标准是「HTTP 200 + 有产出 + 上游自报的模型
+// 与请求的模型一致」，长度只在设了值时再多卡一道；留空（0）就完全不看长度。
 const (
 	DefaultGatewayBaseURL = "https://chatgpt.com/backend-api/codex"
 	DefaultUserAgent      = "codex_cli_rs/0.154.0"
@@ -102,9 +102,13 @@ const (
 	DefaultProbeTimeoutSeconds    = 45
 	DefaultProxiesPerRound        = 4
 	DefaultRetryRounds            = 3
+	DefaultTargetStateLength      = 292
 
 	MinCheckIntervalSeconds = 10
 	MinTicketTTLSeconds     = 300
+	// MaxTargetStateLength 与探针丢弃超长 state 的上限（ticketpool.maxStateBytes）对齐：
+	// 比它还大的目标值永远不可能命中。
+	MaxTargetStateLength = 8192
 )
 
 // 各协议在地址省略端口时补全的默认端口。
@@ -175,6 +179,12 @@ type Ticket struct {
 	ProxiesPerRound int `json:"proxies_per_round"`
 	// RetryRounds 是一轮没撞到满血票时，换未用过的代理再试几轮。
 	RetryRounds int `json:"retry_rounds"`
+	// TargetStateLength 是满血票的 state 长度。非 0 时它是「200 + 有产出 + 上游自报的
+	// 模型与请求一致」之外的附加条件：长度对不上的票判 mismatch，不入池。
+	//
+	// 0 表示不按长度过滤。长度因模型、因上游版本而异（实测 5.5 是 292，premium 是 312），
+	// 所以它是可清空的可选项，不是硬标准。
+	TargetStateLength int `json:"target_state_length"`
 	// IncludeDirect 决定每轮是否也用直连（不经代理）打一发。
 	IncludeDirect bool `json:"include_direct"`
 	// GatewayBaseURL 是撞票用的网关地址。过路请求里嗅探到的地址优先于它。
@@ -257,6 +267,7 @@ func DefaultTicketPool() Ticket {
 		ProbeEffort:            EffortLow,
 		ProxiesPerRound:        DefaultProxiesPerRound,
 		RetryRounds:            DefaultRetryRounds,
+		TargetStateLength:      DefaultTargetStateLength,
 		IncludeDirect:          true,
 		GatewayBaseURL:         DefaultGatewayBaseURL,
 		UserAgent:              DefaultUserAgent,

@@ -37,6 +37,10 @@ func TestParseEmptyYieldsDefaults(t *testing.T) {
 		if pool.TicketTTLSeconds != DefaultTicketTTLSeconds || pool.RefillThresholdSeconds != DefaultRefillThresholdSeconds {
 			t.Fatalf("Parse(%q) 票池时效默认值不正确: %+v", raw, pool)
 		}
+		if pool.TargetStateLength != DefaultTargetStateLength {
+			t.Fatalf("Parse(%q) 满血票长度默认值 = %d，期望 %d",
+				raw, pool.TargetStateLength, DefaultTargetStateLength)
+		}
 		if pool.GatewayBaseURL != DefaultGatewayBaseURL || pool.UserAgent != DefaultUserAgent {
 			t.Fatalf("Parse(%q) 网关默认值不正确: %+v", raw, pool)
 		}
@@ -232,9 +236,6 @@ func TestTicketPoolValidation(t *testing.T) {
 	}
 }
 
-// 满血判定不再看 state 长度，曾经的两个键（全局的 target_state_length 与按模型的
-// model_state_lengths）被移除。宿主里存着的旧配置还带着它们，而解析是
-// DisallowUnknownFields 的——必须接受并忽略，否则升级后第一次 ApplyConfig 就整体失败。
 // 配置页允许把模型一个个删光。显式的空清单必须原样留着——要是被默认值填回去，
 // 管理员删掉的模型下一次保存又自己长回来了。
 func TestExplicitEmptyModelsSurvivesNormalization(t *testing.T) {
@@ -259,9 +260,12 @@ func TestExplicitEmptyModelsSurvivesNormalization(t *testing.T) {
 	}
 }
 
+// 按模型的长度覆盖表 model_state_lengths 已经移除（现在只剩全局一个可清空的
+// target_state_length）。宿主里存着的旧配置还带着它，而解析是 DisallowUnknownFields
+// 的——必须接受并忽略，否则升级后第一次 ApplyConfig 就整体失败。
 func TestLegacyStateLengthKeysIgnored(t *testing.T) {
 	config, err := Parse([]byte(`{"overload_guard":{"ticket_pool":{"pool_size":3,
-		"target_state_length":292,
+		"target_state_length":312,
 		"model_state_lengths":{"gpt-5.6-luna":292,"gpt-6-astra":312}}}}`))
 	if err != nil {
 		t.Fatalf("带旧长度字段的配置应当能解析: %v", err)
@@ -269,15 +273,17 @@ func TestLegacyStateLengthKeysIgnored(t *testing.T) {
 	if config.OverloadGuard.TicketPool.PoolSize != 3 {
 		t.Fatalf("同一份配置里的其它字段应当照常生效: %+v", config.OverloadGuard.TicketPool)
 	}
-	// 回存给宿主的规范化结果里不该再出现这两个键，下一次保存它们就消失了。
+	// 全局的那个键还在用，旧值要照常读进来。
+	if config.OverloadGuard.TicketPool.TargetStateLength != 312 {
+		t.Fatalf("旧配置里的 target_state_length 没读进来: %+v", config.OverloadGuard.TicketPool)
+	}
+	// 回存给宿主的规范化结果里不该再出现覆盖表，下一次保存它就消失了。
 	encoded, err := config.Marshal()
 	if err != nil {
 		t.Fatalf("Marshal 出错: %v", err)
 	}
-	for _, key := range []string{"target_state_length", "model_state_lengths"} {
-		if strings.Contains(string(encoded), key) {
-			t.Fatalf("规范化结果里仍然有已移除的键 %s: %s", key, encoded)
-		}
+	if strings.Contains(string(encoded), "model_state_lengths") {
+		t.Fatalf("规范化结果里仍然有已移除的键 model_state_lengths: %s", encoded)
 	}
 	// 规范化必须幂等：TestConfig 靠比对两次 Marshal 判断配置是否生效。
 	again, err := Parse(encoded)
@@ -290,6 +296,43 @@ func TestLegacyStateLengthKeysIgnored(t *testing.T) {
 	}
 	if string(encoded) != string(second) {
 		t.Fatalf("规范化不幂等:\n%s\n%s", encoded, second)
+	}
+}
+
+// 满血票长度是可清空的：显式的 0 必须原样留着，否则管理员清空它、保存一次，
+// 默认的 292 又自己长回来，池里所有 312 的票就又被判成长度不符了。
+func TestTargetStateLengthIsClearable(t *testing.T) {
+	config, err := Parse([]byte(`{"overload_guard":{"ticket_pool":{"target_state_length":0}}}`))
+	if err != nil {
+		t.Fatalf("Parse 出错: %v", err)
+	}
+	if config.OverloadGuard.TicketPool.TargetStateLength != 0 {
+		t.Fatalf("显式的 0 被改写成了 %d", config.OverloadGuard.TicketPool.TargetStateLength)
+	}
+	encoded, err := config.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal 出错: %v", err)
+	}
+	again, err := Parse(encoded)
+	if err != nil {
+		t.Fatalf("回灌出错: %v", err)
+	}
+	if again.OverloadGuard.TicketPool.TargetStateLength != 0 {
+		t.Fatalf("回灌后变成了 %d", again.OverloadGuard.TicketPool.TargetStateLength)
+	}
+
+	// 负数与 0 同义，统一收敛成 0，规范化才幂等。
+	negative, err := Parse([]byte(`{"overload_guard":{"ticket_pool":{"target_state_length":-5}}}`))
+	if err != nil {
+		t.Fatalf("Parse 出错: %v", err)
+	}
+	if negative.OverloadGuard.TicketPool.TargetStateLength != 0 {
+		t.Fatalf("负数没有收敛成 0，得到 %d", negative.OverloadGuard.TicketPool.TargetStateLength)
+	}
+
+	// 超出探针可能收到的长度区间的值要被拒，那种配置永远撞不到票。
+	if _, err := Parse([]byte(`{"overload_guard":{"ticket_pool":{"target_state_length":99999}}}`)); err == nil {
+		t.Fatal("超过上限的满血票长度应当被拒绝")
 	}
 }
 

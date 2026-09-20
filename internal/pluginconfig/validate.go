@@ -98,6 +98,10 @@ func (t *Ticket) normalize() {
 	if t.UserAgent == "" {
 		t.UserAgent = DefaultUserAgent
 	}
+	// 负数与 0 是同一个意思：不按长度过滤。统一收敛成 0，Marshal 输出才稳定。
+	if t.TargetStateLength < 0 {
+		t.TargetStateLength = 0
+	}
 }
 
 // normalize 规范化代理条目。必须幂等：ValidateConfig 会把规范化结果回存给宿主，
@@ -319,6 +323,12 @@ func (t Ticket) validate(field string) error {
 	}
 	if err := checkRange(field+".retry_rounds", t.RetryRounds, 0, 10); err != nil {
 		return err
+	}
+	// 0 是「不按长度过滤」，合法；其余值必须落在探针可能收到的长度区间里。
+	if t.TargetStateLength != 0 {
+		if err := checkRange(field+".target_state_length", t.TargetStateLength, 1, MaxTargetStateLength); err != nil {
+			return err
+		}
 	}
 	if err := validatePlainURL(field+".gateway_base_url", t.GatewayBaseURL); err != nil {
 		return err

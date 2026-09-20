@@ -352,15 +352,19 @@ func summarize(config pluginconfig.Config, tickets ticketpool.Status,
 		return true, append(lines, "过载防护已开启，但还没有账号被接管，不会有任何撞票流量。")
 	}
 
-	lines = append(lines, fmt.Sprintf("票池：%d/%d 张有效（%d 个账号，每个模型目标 %d 张，"+
-		"满血标准：HTTP 200 且上游返回的模型与请求的一致）。",
-		tickets.Valid, tickets.Wanted, len(tickets.Accounts), guard.TicketPool.PoolSize))
+	standard := "满血标准：HTTP 200 且上游返回的模型与请求的一致"
+	if length := guard.TicketPool.TargetStateLength; length > 0 {
+		standard += fmt.Sprintf("，且 state 长 %d", length)
+	}
+	lines = append(lines, fmt.Sprintf("票池：%d/%d 张有效（%d 个账号，每个模型目标 %d 张，%s）。",
+		tickets.Valid, tickets.Wanted, len(tickets.Accounts), guard.TicketPool.PoolSize, standard))
 	lines = append(lines, formatProxyLine(guard.ProxyPool, proxies, guard.TicketPool.IncludeDirect))
 
 	waiting := 0
 	probed := false
 	downgraded := 0
 	unverified := 0
+	mismatch := 0
 	for _, account := range tickets.Accounts {
 		if !account.HasCredential {
 			waiting++
@@ -371,6 +375,7 @@ func summarize(config pluginconfig.Config, tickets ticketpool.Status,
 			}
 			downgraded += model.Grades[string(ticketpool.GradeDowngraded)]
 			unverified += model.Grades[string(ticketpool.GradeUnverified)]
+			mismatch += model.Grades[string(ticketpool.GradeMismatch)]
 		}
 	}
 	if waiting > 0 {
@@ -390,6 +395,11 @@ func summarize(config pluginconfig.Config, tickets ticketpool.Status,
 	if probed && tickets.Valid == 0 {
 		success = false
 		switch {
+		case mismatch > 0:
+			lines = append(lines, fmt.Sprintf("已经撞过至少一轮但一张满血票都没有：撞到的票模型对得上，"+
+				"但 state 长度与设定的满血票长度 %d 不符（见上面的「长度不符」计数）。"+
+				"满血长度因模型、因上游版本而异，看一眼卡片明细里的实际长度，改成它或者清空这一项。",
+				guard.TicketPool.TargetStateLength))
 		case downgraded > 0:
 			lines = append(lines, "已经撞过至少一轮但一张满血票都没有：上游正在用别的模型服务这些请求"+
 				"（见上面的「降级」计数），这是账号在上游的模型权限问题，插件层改不了；"+

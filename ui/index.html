@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<!--
+  Overload Guard 插件配置页。
+
+  宿主把本页放进 sandbox="allow-scripts" 的 iframe，CSP 为
+  default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';
+  img-src 'self' data: blob:; connect-src 'none'
+  因此：只能用同包内的 classic script（不透明来源下 ES module 会被 CORS 拦掉）、
+  不能引任何外部字体/图标，也不能自己发 fetch/XHR，所有数据都走 UI Bridge。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Overload Guard 过载防护</title>
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body>
+    <main class="page" id="page">
+      <header class="page-head">
+        <h1>过载防护</h1>
+        <div class="head-actions">
+          <div class="head-status" id="head-status" role="status" aria-live="polite">加载中…</div>
+          <label class="head-switch">
+            <input type="checkbox" id="guard-enabled" />
+            <span>启用过载防护</span>
+          </label>
+        </div>
+      </header>
+
+      <div class="banner banner-error" id="fatal" role="alert" hidden></div>
+
+      <div class="body" id="body" hidden>
+        <!-- 1. 实时票况看板 -->
+        <section class="card">
+          <div class="card-head">
+            <h2>实时票况</h2>
+            <div class="head-actions">
+              <button type="button" class="btn btn-ghost btn-sm" id="status-refresh" disabled>刷新状态</button>
+            </div>
+          </div>
+          <p class="card-note">
+            看板展示的是<strong>已保存并生效</strong>那份配置下的实时状态，数据全部来自插件内存，
+            不产生任何额外出站流量。插件从过路请求里采 OAuth 凭据，所以一个账号要先有真实请求经过，
+            它的票池才会开始预热。
+            <strong>打开本页时会跑一次 config.test</strong>把卡片组填出来（宿主可能要求二次验证）；之后在
+            sub2api ≥ 0.2.7 上<strong>每 10 秒经宿主的只读状态通道自动刷新一次</strong>，免二次验证、不弹任何提示；
+            更老的宿主没有这条通道，会停掉自动刷新，改为手动点「刷新状态」（同样走 config.test）。
+          </p>
+          <div class="status-pills" id="status-pills"></div>
+          <div class="status-accounts" id="status-accounts"></div>
+          <div class="status-proxies" id="status-proxies"></div>
+          <p class="empty" id="status-empty">正在读取实时票况……</p>
+          <div class="diagnostic" id="status-error" role="alert" hidden></div>
+        </section>
+
+        <!-- 2. 票池 -->
+        <section class="card">
+          <h2>票池</h2>
+          <p class="card-note">
+            插件自己向网关发探针请求「撞票」：只有 <code>x-codex-turn-state</code>
+            长度<strong>恰好等于</strong>下面那个「满血票长度」的才会入池，其余（例如降智池的 312）一律丢弃。
+            数字框留空表示恢复默认值。
+          </p>
+          <div class="grid">
+            <label class="field field-wide">
+              <span class="label">模型（每行一个）</span>
+              <textarea id="tp-models" rows="4" spellcheck="false" autocomplete="off"></textarea>
+              <em class="hint">
+                每个「账号 × 模型」维护一个独立票池——state 按模型铸造，跨模型复用会被上游识破。
+                最多 16 个模型
+              </em>
+            </label>
+            <label class="field field-wide checkbox-field">
+              <input type="checkbox" id="tp-follow" />
+              <span>
+                <span class="label">自动跟踪请求里出现的新模型</span>
+                <em class="hint">上面没列到的模型，只要有请求用过就自动建池；关掉它则只维护列表里的模型</em>
+              </span>
+            </label>
+            <label class="field">
+              <span class="label">每个池的票数</span>
+              <input type="number" id="tp-pool-size" min="1" max="20" step="1" inputmode="numeric" />
+              <em class="hint">1-20，默认 5</em>
+            </label>
+            <label class="field">
+              <span class="label">满血票长度</span>
+              <input type="number" id="tp-target-length" min="0" max="4096" step="1" inputmode="numeric" />
+              <em class="hint">默认 292；填 0 表示不按长度判定（任何撞出产出的票都入池）</em>
+            </label>
+            <label class="field">
+              <span class="label">票有效期（秒）</span>
+              <input type="number" id="tp-ttl" min="300" max="86400" step="1" inputmode="numeric" />
+              <em class="hint">300-86400，默认 2700。上游不告知真实有效期，这是经验值</em>
+            </label>
+            <label class="field">
+              <span class="label">同批错峰（秒）</span>
+              <input type="number" id="tp-stagger" min="0" max="3600" step="1" inputmode="numeric" />
+              <em class="hint">0-3600，默认 600。让同批入池的票逐张提前过期，避免整池同时到期</em>
+            </label>
+            <label class="field">
+              <span class="label">补池阈值（秒）</span>
+              <input type="number" id="tp-threshold" min="30" step="1" inputmode="numeric" />
+              <em class="hint">默认 600，不能超过票有效期。既是「池未满时的补池冷却」，也是「池已满时的续期阈值」</em>
+            </label>
+            <label class="field">
+              <span class="label">检查间隔（秒）</span>
+              <input type="number" id="tp-interval" min="10" max="3600" step="1" inputmode="numeric" />
+              <em class="hint">10-3600，默认 30。上一轮结束到下一轮开始的间隔</em>
+            </label>
+            <label class="field">
+              <span class="label">探针超时（秒）</span>
+              <input type="number" id="tp-probe-timeout" min="5" max="300" step="1" inputmode="numeric" />
+              <em class="hint">5-300，默认 45</em>
+            </label>
+            <label class="field">
+              <span class="label">探针推理强度</span>
+              <select id="tp-effort">
+                <option value="none">none（不带 reasoning 字段）</option>
+                <option value="minimal">minimal</option>
+                <option value="low">low（默认）</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+              <em class="hint">强度越低，探针消耗越小</em>
+            </label>
+            <label class="field">
+              <span class="label">每轮并用代理数</span>
+              <input type="number" id="tp-proxies-per-round" min="0" max="32" step="1" inputmode="numeric" />
+              <em class="hint">0-32，默认 4。撞票靠不同出口 IP 碰运气</em>
+            </label>
+            <label class="field">
+              <span class="label">失败重试轮数</span>
+              <input type="number" id="tp-retry-rounds" min="0" max="10" step="1" inputmode="numeric" />
+              <em class="hint">0-10，默认 3。一轮没撞到满血票时换没用过的代理再试；总探测轮数 = 1 + 这个数</em>
+            </label>
+            <label class="field field-wide checkbox-field">
+              <input type="checkbox" id="tp-include-direct" />
+              <span>
+                <span class="label">每轮也用直连打一发</span>
+                <em class="hint">关掉它就必须至少启用一条代理，否则撞票没有任何出口，保存时会被拦下</em>
+              </span>
+            </label>
+            <label class="field field-wide">
+              <span class="label">网关地址</span>
+              <input type="text" id="tp-gateway" spellcheck="false" autocomplete="off" />
+              <em class="hint">
+                探针兜底地址，默认 <code>https://chatgpt.com/backend-api/codex</code>；
+                过路请求里嗅探到的真实网关优先于它
+              </em>
+            </label>
+            <label class="field field-wide">
+              <span class="label">探针 User-Agent</span>
+              <input type="text" id="tp-user-agent" spellcheck="false" autocomplete="off" />
+              <em class="hint">兜底值，默认 <code>codex_cli_rs/0.154.0</code>；过路请求带了 UA 时优先沿用真实客户端的</em>
+            </label>
+          </div>
+        </section>
+
+        <!-- 3. 代理池 -->
+        <section class="card">
+          <div class="card-head">
+            <h2>代理池</h2>
+            <label class="head-switch">
+              <input type="checkbox" id="pp-enabled" />
+              <span>启用代理池</span>
+            </label>
+          </div>
+          <p class="card-note">
+            直接填写自己的代理，支持 <code>socks5</code>／<code>socks5h</code>／<code>http</code>／<code>https</code>，
+            不写协议按 <code>socks5</code> 处理，不写端口按协议补默认端口。
+            插件<strong>不做连通性测试、也不会自动剔除</strong>：填了就用，好坏看下面的撞票成败统计。
+            代理只存在内存里，不会写入磁盘，日志与看板里的地址都已打码。
+          </p>
+          <div class="table-wrap">
+            <table class="rows">
+              <thead>
+                <tr>
+                  <th>备注</th>
+                  <th>协议</th>
+                  <th>地址</th>
+                  <th>状态</th>
+                  <th class="col-actions">操作</th>
+                </tr>
+              </thead>
+              <tbody id="proxy-rows"></tbody>
+            </table>
+          </div>
+          <p class="empty" id="proxy-empty" hidden>还没有代理，点「+ 添加代理」开始。</p>
+          <div>
+            <button type="button" class="btn btn-ghost btn-sm" id="proxy-add">+ 添加代理</button>
+          </div>
+        </section>
+
+        <!-- 4. 账号 -->
+        <section class="card">
+          <div class="card-head">
+            <h2>账号</h2>
+            <button type="button" class="btn btn-ghost" id="account-add">+ 添加账号</button>
+          </div>
+          <p class="card-note">
+            沙箱页面拿不到账号列表，这里按<strong>账号 ID</strong> 配置（ID 见管理端账号详情）。
+            未列出的账号一律直接透传，既不注入头，也不会为它撞票。
+          </p>
+          <div class="table-wrap">
+            <table class="rows">
+              <thead>
+                <tr>
+                  <th>账号 ID</th>
+                  <th>备注</th>
+                  <th>状态</th>
+                  <th class="col-actions">操作</th>
+                </tr>
+              </thead>
+              <tbody id="account-rows"></tbody>
+            </table>
+          </div>
+          <p class="empty" id="account-empty" hidden>还没有账号，点「+ 添加账号」开始。</p>
+        </section>
+
+        <div class="banner banner-warn" id="dirty" hidden>有未保存的修改。</div>
+        <div class="diagnostic" id="diagnostic" aria-live="polite" hidden></div>
+      </div>
+
+      <footer class="actions" id="actions" hidden>
+        <button type="button" class="btn btn-primary" id="btn-save">保存</button>
+        <button type="button" class="btn btn-ghost" id="btn-reload">放弃修改</button>
+      </footer>
+    </main>
+
+    <!-- 账号弹窗 -->
+    <div class="modal-backdrop" id="account-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="account-modal-title">
+        <div class="modal-head">
+          <h2 id="account-modal-title">添加账号</h2>
+          <button type="button" class="icon-btn" data-close="account-modal" aria-label="关闭">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="grid">
+            <label class="field">
+              <span class="label">账号 ID</span>
+              <input type="number" id="modal-account-id" min="1" step="1" inputmode="numeric" />
+              <em class="hint">管理端账号详情里的数字 ID</em>
+            </label>
+            <label class="field">
+              <span class="label">备注（可选）</span>
+              <input type="text" id="modal-note" maxlength="120" autocomplete="off" />
+              <em class="hint">最多 120 字节（一个汉字占 3 字节）</em>
+            </label>
+          </div>
+          <div class="banner banner-error" id="account-modal-error" hidden></div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-primary" id="account-modal-confirm">确定</button>
+          <button type="button" class="btn btn-ghost" data-close="account-modal">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 代理弹窗 -->
+    <div class="modal-backdrop" id="proxy-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="proxy-modal-title">
+        <div class="modal-head">
+          <h2 id="proxy-modal-title">添加代理</h2>
+          <button type="button" class="icon-btn" data-close="proxy-modal" aria-label="关闭">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="grid">
+            <label class="field">
+              <span class="label">备注（可选）</span>
+              <input type="text" id="proxy-name" maxlength="40" autocomplete="off" />
+              <em class="hint">只用于在这张表里认人，最多 40 字节（一个汉字占 3 字节）</em>
+            </label>
+            <label class="field">
+              <span class="label">协议</span>
+              <select id="proxy-scheme">
+                <option value="socks5">socks5（默认，域名在本地解析）</option>
+                <option value="socks5h">socks5h（域名交给代理解析）</option>
+                <option value="http">http</option>
+                <option value="https">https</option>
+              </select>
+            </label>
+            <label class="field field-wide">
+              <span class="label">地址</span>
+              <input type="text" id="proxy-addr" spellcheck="false" autocomplete="off" placeholder="1.2.3.4:1080" />
+              <em class="hint">
+                填 <code>host:port</code>；不写端口按协议补默认值（socks5 1080 / http 80 / https 443）。
+                直接粘贴整条 <code>socks5://user:pass@1.2.3.4:1080</code> 也行，会自动拆进各字段
+              </em>
+            </label>
+            <label class="field">
+              <span class="label">用户名（可选）</span>
+              <input type="text" id="proxy-username" spellcheck="false" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span class="label">密码（可选）</span>
+              <input type="password" id="proxy-password" spellcheck="false" autocomplete="new-password" />
+              <em class="hint">与配置一起保存在宿主，不会出现在日志与看板里</em>
+            </label>
+            <label class="field field-wide checkbox-field">
+              <input type="checkbox" id="proxy-enabled" />
+              <span>
+                <span class="label">启用该代理</span>
+                <em class="hint">关掉后保留配置但不参与撞票，也不会出现在状态看板里</em>
+              </span>
+            </label>
+          </div>
+          <div class="banner banner-error" id="proxy-modal-error" hidden></div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-primary" id="proxy-modal-confirm">确定</button>
+          <button type="button" class="btn btn-ghost" data-close="proxy-modal">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="assets/bridge-v1.js"></script>
+    <script src="assets/app.js"></script>
+  </body>
+</html>

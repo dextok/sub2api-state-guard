@@ -1,0 +1,4 @@
+repo: Wei-Shaw/sub2api
+ref: v0.2.7
+commit: aea725f2ea644d5592d0bbb1d63b607efa7e200a
+path: backend/pkg/pluginapi/v1

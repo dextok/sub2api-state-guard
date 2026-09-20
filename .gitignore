@@ -1,0 +1,12 @@
+# 交叉编译中间产物与发布者密钥：私钥绝不能进仓库。
+build/
+dist/
+*.private
+*.public
+*.s2plugin
+
+# 本地开发用的工作区文件（例如临时 replace 到别处的 sub2api 检出）。
+go.work
+go.work.sum
+
+.DS_Store
